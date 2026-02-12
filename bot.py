@@ -2039,58 +2039,73 @@ async def get_file_ids(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def post_init(application):
     await application.bot.set_my_commands([
-        BotCommand("start", "Start"), BotCommand("wheel", "Spin"), BotCommand("explore", "Explore"),
-        BotCommand("myteam", "Team"), BotCommand("battle", "Fight"), BotCommand("stats", "Stats"),
-        BotCommand("open", "Open Menu"), BotCommand("close", "Close Menu"),
-        BotCommand("mycollection", "Crew"), BotCommand("inventory", "Treasury"),
-        BotCommand("myprofile", "Profile"), BotCommand("sendberry", "Send Berries"), BotComamnd("unstuck", "Unstuck"),
-        BotCommand("sendclovers", "Send Clovers"), BotCommand("inspect", "Fruit/Weapon Info"),
-        BotCommand("store", "Open Store"), BotCommand("buy", "Buy Items"), BotCommand("use", "Use Items"),
+        BotCommand("start", "Start Journey"), 
+        BotCommand("wheel", "Spin Wheel"), 
+        BotCommand("explore", "Explore Grand Line"),
+        BotCommand("myteam", "Manage Team"), 
+        BotCommand("battle", "Challenge Player"), 
+        BotCommand("stats", "Character Stats"),
+        BotCommand("open", "Open Menu"), 
+        BotCommand("close", "Close Menu"),
+        BotCommand("mycollection", "View Crew"), 
+        BotCommand("inventory", "Treasury"),
+        BotCommand("myprofile", "Player Profile"), 
+        BotCommand("unstuck", "Reset Stuck Session"), # FIXED: Corrected spelling
+        BotCommand("sendberry", "Gift Berries"), 
+        BotCommand("sendclovers", "Gift Clovers"), 
+        BotCommand("inspect", "Fruit/Weapon Info"),
+        BotCommand("store", "Open Store"), 
+        BotCommand("buy", "Buy Items"), 
+        BotCommand("use", "Use Items"),
         BotCommand("referral", "Invite Friends")
     ])
 
-
 # =====================
-# BOT SETUP
+# BOT EXECUTION
 # =====================
-
-# Load token from environment variable.
-TOKEN = os.getenv("BOT_TOKEN")
 
 if __name__ == "__main__":
     if not TOKEN:
-        print("❌ Error: BOT_TOKEN is missing! Please set it in your .env file.")
+        print("❌ Error: BOT_TOKEN is missing!")
         exit(1)
     if not MONGO_URI:
-        print("❌ Error: MONGO_URI is missing! Please set it in your .env file.")
+        print("❌ Error: MONGO_URI is missing!")
         exit(1)
 
+    # Building the application with JobQueue enabled
     application = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
 
-    application.add_handlers([
-        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu_click),
-        CommandHandler("start", start),
-        CommandHandler("open", open_cmd),
-        CommandHandler("close", close_cmd),
-        CommandHandler("wheel", wheel_cmd),
-        CommandHandler("explore", explore_cmd),
-        CommandHandler("stats", stats_cmd),
-        CommandHandler("unstuck", unstuck),
-        CommandHandler("inspect", inspect_cmd),
-        CommandHandler("mycollection", mycollection),
-        CommandHandler("inventory", inventory_cmd),
-        CommandHandler("myprofile", myprofile_cmd),
-        CommandHandler("sendberry", sendberry_cmd),
-        CommandHandler("sendclovers", sendclovers_cmd),
-        CommandHandler("myteam", myteam),
-        CommandHandler("battle", battle_request),
-        CommandHandler("store", store_cmd),
-        CommandHandler("buy", buy_cmd),
-        CommandHandler("use", use_cmd),
-        CommandHandler("referral", referral_cmd),
-        MessageHandler(filters.PHOTO | filters.VIDEO, get_file_ids),
-        CallbackQueryHandler(main_callback)
-    ])
+    # Registering Handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("open", open_cmd))
+    application.add_handler(CommandHandler("close", close_cmd))
+    application.add_handler(CommandHandler("wheel", wheel_cmd))
+    application.add_handler(CommandHandler("explore", explore_cmd))
+    application.add_handler(CommandHandler("stats", stats_cmd))
+    application.add_handler(CommandHandler("unstuck", unstuck_cmd)) # FIXED: Function name
+    application.add_handler(CommandHandler("unlock", unlock_cmd))   # ADDED: Admin Unlock
+    application.add_handler(CommandHandler("inspect", inspect_cmd))
+    application.add_handler(CommandHandler("mycollection", mycollection))
+    application.add_handler(CommandHandler("inventory", inventory_cmd))
+    application.add_handler(CommandHandler("myprofile", myprofile_cmd))
+    application.add_handler(CommandHandler("sendberry", sendberry_cmd))
+    application.add_handler(CommandHandler("sendclovers", sendclovers_cmd))
+    application.add_handler(CommandHandler("myteam", myteam))
+    application.add_handler(CommandHandler("battle", battle_request))
+    application.add_handler(CommandHandler("store", store_cmd))
+    application.add_handler(CommandHandler("buy", buy_cmd))
+    application.add_handler(CommandHandler("use", use_cmd))
+    application.add_handler(CommandHandler("referral", referral_cmd))
+    
+    # Generic Message Handlers
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu_click))
+    application.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, get_file_ids))
+    application.add_handler(CallbackQueryHandler(main_callback))
 
-    print("🏴‍☠️ Pirate Bot is sailing!...")
+    # START SECURITY SCHEDULER (Every 15 Minutes)
+    job_queue = application.job_queue
+    job_queue.run_repeating(auto_detector_job, interval=900, first=10)
+
+    print("🏴‍☠️ Pirate Bot is sailing with Marine Security Active!...")
     application.run_polling()
+
