@@ -981,7 +981,8 @@ async def buy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: `/buy Item Name`")
         return
     uid = str(update.effective_user.id)
-    p = load_player(uid
+    p = load_player(uid)
+    
     if p and p.get('is_locked'):
     # This works for both messages and button clicks!
         await update.effective_message.reply_text("❌ Your account is locked. Contact admin.")
@@ -1042,7 +1043,8 @@ async def use_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: `/use Item Name`")
         return
     uid = str(update.effective_user.id)
-    p = load_player(uid
+    p = load_player(uid)
+    
     if p and p.get('is_locked'):
     # This works for both messages and button clicks!
         await update.effective_message.reply_text("❌ Your account is locked. Contact admin.")
