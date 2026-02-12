@@ -1001,11 +1001,19 @@ async def run_battle_turn(query, battle_id, move_name=None, context=None):
         return
 
     if b.get('is_npc') and b['turn_owner'] == "p2":
-        move_name = random.choice(attacker['moves'] + ([attacker['ult']] if not attacker.get('ult_used') else []))
+        # The NPC now only has one basic move at index 0
+        basic_move = attacker['moves'][0]
+        
+        # Logic: 30% chance to use Ultimate if it hasn't been used yet
+        if not attacker.get('ult_used') and random.random() < 0.3:
+            move_name = attacker['ult']
+        else:
+            move_name = basic_move
 
     if not move_name:
         await show_move_selection(query, battle_id, context=context)
         return
+
 
     if random.random() < (attacker.get('dodge_chance', 0) / 100):
         log = f"💨 **{defender['name']}** dodged the attack!"
