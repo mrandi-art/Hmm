@@ -728,16 +728,14 @@ async def show_starter_page(update, name, target_user_id):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    # Use first_name as fallback to prevent crashes for users without usernames
     username = update.effective_user.username or update.effective_user.first_name or "Pirate"
     
-    # 1. Instant RAM Lookup (Checks cache first, then DB)
-    p = load_player(user_id) #
+    # 1. Instant RAM Lookup
+    p = load_player(user_id) 
     is_new = False
 
     if not p:
         is_new = True
-        # Create a new player object locally in RAM
         p = {
             "user_id": user_id, "name": username, "team": [], "characters": [],
             "berries": 10000, "clovers": 0, "bounty": 0, "exp": 0, "level": 1,
@@ -746,13 +744,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "explore_count": 0, "start_date": datetime.now().strftime("%Y-%m-%d"),
             "referred_by": None, "referrals": 0
         }
-        #
 
-    # 2. Optimized Referral Logic (Only for brand new users)
+    # 2. Optimized Referral Logic
     if is_new and context.args:
         try:
             referrer_id = str(context.args[0])
-            # Prevent self-referral (a common cause of logic failure)
             if referrer_id != user_id:
                 referrer = load_player(referrer_id)
                 if referrer:
@@ -764,39 +760,53 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     referrer['clovers'] += 100
                     referrer['referrals'] = referrer.get('referrals', 0) + 1
 
-                    # Background save for referrer
-                    save_player(referrer_id, referrer) #
+                    # Save referrer immediately to RAM
+                    save_player(referrer_id, referrer)
 
-                    await update.message.reply_text(f"🤝 Referred by {referrer['name']}! Bonus added.")
+                    await update.message.reply_text(f"🤝 Referred by {referrer['name']}! Bonus: 5,000 🍇 + 50 🍀")
+                    
+                    # UPDATED: Notification including Clovers
                     try:
-                        await context.bot.send_message(chat_id=referrer_id, text=f"🤝 {p['name']} joined! +10,000 🍇")
+                        await context.bot.send_message(
+                            chat_id=referrer_id, 
+                            text=f"🤝 **{p['name']}** joined!\n🍇 `+10,000` Berries\n🍀 `+100` Clovers",
+                            parse_mode="Markdown"
+                        )
                     except: pass
         except Exception as e:
             logging.error(f"Referral logic error: {e}")
 
-    # 3. Final Save (Updates RAM instantly)
-    save_player(user_id, p) #
+    # 3. Final Save
+    save_player(user_id, p)
 
     if p.get("starter_summoned"):
         await update.message.reply_text(f"Welcome back Captain {p['name']}!")
         return
 
-    # Pass user_id to lock the selection
     await show_starter_page(update, "Usopp", user_id)
-
 
 async def referral_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     bot_username = context.bot.username
     link = f"https://t.me/{bot_username}?start={user_id}"
+    
+    p = get_player(user_id)
+    ref_count = p.get('referrals', 0)
+    
     text = (
-        f"📣 **INVITE FRIENDS**\n\n"
-        f"Share your link to earn rewards!\n\n"
-        f"🔗 ` {link} `\n\n"
-        f"**Your Rewards:** 10,000 🍇 + 100 🍀 per friend.\n"
-        f"**Friend's Rewards:** 5,000 🍇 + 50 🍀 starter bonus."
+        f"╭━━━━━━━━━━━━━━━╮\n"
+        f"✦    🤝 REFERRAL 🤝     ✦\n"
+        f"╰━━━━━━━━━━━━━━━╯\n\n"
+        f"Share your link to grow your fleet!\n\n"
+        f"🔗 **YOUR LINK:**\n`{link}`\n\n"
+        f"🎁 **REWARDS**\n"
+        f"• You get: 10,000 🍇 + 100 🍀\n"
+        f"• Friend gets: 5,000 🍇 + 50 🍀\n\n"
+        f"📊 **TOTAL RECRUITS:** `{ref_count}`"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
+
+
 
 # =====================
 # STORE & BUY SYSTEM
