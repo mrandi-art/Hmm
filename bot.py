@@ -550,15 +550,19 @@ def get_stats_text(char_obj_or_name, player_fruit=None):
     c = CHARACTERS.get(name)
     if not c: return "Character not found."
 
+    # Pull the full label from your RARITY_STYLES dictionary
+    rarity_info = RARITY_STYLES.get(c['rarity'], {"label": c['rarity']})
+    rarity_display = rarity_info['label']
+
     stats = get_scaled_stats({"name": name, "level": lvl}, player_fruit)
     ult_name = c['ult']
     ult_damage = MOVES[ult_name]['dmg']
     ult_desc = EFFECT_DESCRIPTIONS.get(name, "No additional effect.")
 
-    # UPDATED: Removed moves[1] to prevent "list index out of range"
+    # UI Construction
     text = (
         f"《Name》: {name}\n"
-        f"《Rarity》: {c['rarity']}\n"
+        f"《Rarity》: {rarity_display}\n"
         f"《 Class》: {c['class']}\n"
         f"《Level》: {lvl}\n\n"
         f"      《STATS》\n"
@@ -569,6 +573,7 @@ def get_stats_text(char_obj_or_name, player_fruit=None):
         f"■ 《BASIC》: {c['moves'][0]}: Damage {MOVES[c['moves'][0]]['dmg']}\n"
         f"♤《 ULTIMATE》: {ult_name}: Damage {ult_damage}. {ult_desc}"
     )
+    
     if weapon:
         w_data = WEAPONS[weapon]
         text += f"\n⚔️ 《WEAPON》: {weapon}: {w_data['spec']} (Dmg: {w_data['atk_val']})"
