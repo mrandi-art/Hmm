@@ -1286,7 +1286,7 @@ async def main_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     uid = str(query.from_user.id)
     
-    spamming, wait_time = await is_spamming(uid, 3)
+    spamming, wait_time = await is_spamming(uid, 1)
     if spamming:
         await query.answer(f"⏳ Slow down! Wait {wait_time}s...", show_alert=True)
         return
