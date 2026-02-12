@@ -2003,6 +2003,36 @@ async def handle_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "Close ❌":
         return await close_cmd(update, context)
 
+async def unstuck_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
+    p = load_player(uid)
+    
+    if not p:
+        return
+
+    # 1. Security Check
+    if p.get('is_locked'):
+        await update.message.reply_text("❌ You are currently locked by Marine Security. Contact Admin.")
+        return
+
+    # 2. State Reset
+    # Resetting the 'last_interaction' or cooldown timestamps
+    p['last_interaction'] = 0 
+    p['verification_active'] = False # Just in case a message was deleted
+    
+    # Save changes to RAM and DB
+    save_player(uid, p)
+    
+    await update.message.reply_text("🛠 **System Reset!** Your session has been unstuck. You may continue.")
+    
+    # Optional: Log to your Admin Group
+    await context.bot.send_message(
+        chat_id="-5178096636",
+        text=f"🛠 **UNSTUCK:** User `{p.get('name')}` (`{uid}`) reset their state.",
+        parse_mode="Markdown"
+    )
+
+
 async def get_file_ids(update: Update, context: ContextTypes.DEFAULT_TYPE):
     fid = update.message.photo[-1].file_id if update.message.photo else (update.message.video.file_id if update.message.video else None)
     if fid: await update.message.reply_text(f"File ID: `{fid}`", parse_mode="Markdown")
@@ -2013,7 +2043,7 @@ async def post_init(application):
         BotCommand("myteam", "Team"), BotCommand("battle", "Fight"), BotCommand("stats", "Stats"),
         BotCommand("open", "Open Menu"), BotCommand("close", "Close Menu"),
         BotCommand("mycollection", "Crew"), BotCommand("inventory", "Treasury"),
-        BotCommand("myprofile", "Profile"), BotCommand("sendberry", "Send Berries"),
+        BotCommand("myprofile", "Profile"), BotCommand("sendberry", "Send Berries"), BotComamnd("unstuck", "Unstuck"),
         BotCommand("sendclovers", "Send Clovers"), BotCommand("inspect", "Fruit/Weapon Info"),
         BotCommand("store", "Open Store"), BotCommand("buy", "Buy Items"), BotCommand("use", "Use Items"),
         BotCommand("referral", "Invite Friends")
@@ -2045,6 +2075,7 @@ if __name__ == "__main__":
         CommandHandler("wheel", wheel_cmd),
         CommandHandler("explore", explore_cmd),
         CommandHandler("stats", stats_cmd),
+        CommandHandler("unstuck", unstuck),
         CommandHandler("inspect", inspect_cmd),
         CommandHandler("mycollection", mycollection),
         CommandHandler("inventory", inventory_cmd),
