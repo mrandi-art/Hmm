@@ -19,7 +19,7 @@ dns.resolver.default_resolver.nameservers = ['8.8.8.8', '8.8.4.4']
 
 from pymongo import MongoClient
 from telegram.request import HTTPXRequest
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, InputMediaPhoto, InputMediaVideo, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, InputMediaPhoto, InputMediaVideo, ReplyKeyboardMarkup, ReplyKeyboardRemove, constants
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
