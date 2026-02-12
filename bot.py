@@ -37,6 +37,13 @@ RARITY_STYLES = {
     "Legendary": {"symbol": "⚜️", "label": "⚜️ Legendary"}
 }
 
+RIDDLES = [
+    {"hint": "the object to stop a ship 🛑", "correct": "⚓️", "options": ["⚔️", "⚓️", "🧭"]},
+    {"hint": "the weapon of a true swordsman 🤺", "correct": "⚔️", "options": ["🏹", "⚔️", "🛡"]},
+    {"hint": "what you need to steer the ship ☸️", "correct": "☸️", "options": ["🛶", "⚓️", "☸️"]},
+    {"hint": "the Jolly Roger 🏴‍☠️", "correct": "🏴‍☠️", "options": ["🚩", "🏳️", "🏴‍☠️"]}
+]
+
 # =====================
 # LOGGING SETUP
 # =====================
@@ -90,20 +97,41 @@ def init_db():
 
 def load_player(user_id):
     uid = str(user_id)
-    # Check RAM first (Instant)
+    # 1. Check RAM first (Instant)
     if uid in player_cache:
         return player_cache[uid]
         
-    if players_collection is None: return None
+    if players_collection is None: 
+        return None
+        
     try:
-        # If not in RAM, get from DB (Slow)
+        # 2. Get from DB (Slow)
         data = players_collection.find_one({"user_id": uid}, {"_id": 0})
+        
         if data:
-            player_cache[uid] = data # Store in RAM for ultra-fast access
+            # 3. SAFETY NET: Inject fields if missing for old players
+            updated = False
+            if "is_locked" not in data:
+                data["is_locked"] = False
+                updated = True
+            if "verification_active" not in data:
+                data["verification_active"] = False
+                updated = True
+            
+            # If we fixed an old record, save it back to DB immediately
+            if updated:
+                players_collection.update_one({"user_id": uid}, {"$set": data})
+                logging.info(f"Fixed missing security fields for old player {uid}")
+
+            # 4. Store in RAM for ultra-fast access
+            player_cache[uid] = data 
+            return data
+            
         return data
     except Exception as e:
         logging.error(f"Error loading player {user_id}: {e}")
         return None
+
 
 def save_player(user_id, player_data):
     uid = str(user_id)
@@ -494,6 +522,73 @@ async def is_spamming(user_id, cooldown_seconds=3):
     BUTTON_COOLDOWNS[user_id] = current_time
     return False, 0
 
+async def trigger_security_check(user_id, context):
+    p = get_player(user_id)
+    riddle = random.choice(RIDDLES)
+    p['verification_active'] = True
+    
+    # Randomize button order
+    random.shuffle(riddle['options'])
+    
+    keyboard = []
+    for opt in riddle['options']:
+        # Data format: verify:is_correct:user_id
+        is_correct = "1" if opt == riddle['correct'] else "0"
+        keyboard.append(InlineKeyboardButton(opt, callback_data=f"v:{is_correct}:{user_id}"))
+
+    text = (
+        f"⚠️ **MARINE SECURITY CHECK!**\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"Identify **{riddle['hint']}** within 15 seconds!\n"
+        f"━━━━━━━━━━━━━━━━━━━"
+    )
+    
+    msg = await context.bot.send_message(chat_id=user_id, text=text, reply_markup=InlineKeyboardMarkup([keyboard]), parse_mode="Markdown")
+    
+    # Auto-lock after 15 seconds if still active
+    context.job_queue.run_once(security_timeout, 15, data={'user_id': user_id, 'msg_id': msg.message_id})
+
+async def security_timeout(context: ContextTypes.DEFAULT_TYPE):
+    job_data = context.job.data
+    uid = job_data['user_id']
+    msg_id = job_data['msg_id']
+    
+    p = get_player(uid) # RAM Fetch
+    
+    # If they still have verification_active, it means they didn't click anything
+    if p and p.get('verification_active'):
+        p['verification_active'] = False
+        p['is_locked'] = True
+        save_player(uid, p) # Push to RAM and DB
+
+        try:
+            # Update the message so they know they are locked
+            await context.bot.edit_message_text(
+                chat_id=uid,
+                message_id=msg_id,
+                text="🚫 **ACCOUNT LOCKED (TIMEOUT)**\nYou failed to respond to the Marine Security Check. Contact admin."
+            )
+            
+            # Notify your Log Group
+            await context.bot.send_message(
+                chat_id="-5178096636",
+                text=f"🚨 **BOT DETECTION (TIMEOUT)**\n👤: `{p.get('name')}`\n🆔: `{uid}`\n👉 `/unlock {uid}`",
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            logging.error(f"Timeout logic failed for {uid}: {e}")
+
+async def unlock_cmd(update, context):
+    if str(update.effective_user.id) not in ADMIN_IDS: return
+    
+    target_id = context.args[0]
+    p = get_player(target_id)
+    if p:
+        p['is_locked'] = False
+        save_player(target_id, p)
+        await update.message.reply_text(f"✅ User `{target_id}` unlocked.")
+        await context.bot.send_message(chat_id=target_id, text="🔓 **Your account has been unlocked!**")
+
 def get_player(user_id, username=None):
     uid = str(user_id)
     
@@ -625,6 +720,12 @@ async def explore_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     p = get_player(update.effective_user.id)
     uid = str(p['user_id'])
 
+    if p and p.get('is_locked'):
+    # This works for both messages and button clicks!
+        await update.effective_message.reply_text("❌ Your account is locked. Contact admin.")
+        return
+
+
     # UPDATED: 2-minute cooldown logic for pending battles
     if uid in pending_explores:
         pending_data = pending_explores[uid]
@@ -743,6 +844,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     p = load_player(user_id) 
     is_new = False
 
+    if p and p.get('is_locked'):
+    # This works for both messages and button clicks!
+        await update.effective_message.reply_text("❌ Your account is locked. Contact admin.")
+        return
+
+
     if not p:
         is_new = True
         p = {
@@ -750,8 +857,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "berries": 10000, "clovers": 0, "bounty": 0, "exp": 0, "level": 1,
             "starter_summoned": False, "wins": 0, "losses": 0, "explore_wins": 0, "kill_count": 0,
             "fruits": [], "equipped_fruit": None, "tokens": 0, "weapons": [],
-            "explore_count": 0, "start_date": datetime.now().strftime("%Y-%m-%d"),
-            "referred_by": None, "referrals": 0
+            "explore_count": 0, "start_date": datetime.now().strftime("%Y-%m-%d"),"is_locked": False,
+            "verification_active": False, "referred_by": None, "referrals": 0
         }
 
     # 2. Optimized Referral Logic
@@ -801,7 +908,13 @@ async def referral_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     p = get_player(user_id)
     ref_count = p.get('referrals', 0)
-    
+
+    if p and p.get('is_locked'):
+    # This works for both messages and button clicks!
+        await update.effective_message.reply_text("❌ Your account is locked. Contact admin.")
+        return
+
+
     text = (
         f"╭━━━━━━━━━━━━━━━╮\n"
         f"✦    🤝 REFERRAL 🤝     ✦\n"
@@ -826,6 +939,12 @@ async def store_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         await update.message.reply_text("⚠️ This command can only be used in private messages (DM).")
         return
+
+    if p and p.get('is_locked'):
+    # This works for both messages and button clicks!
+        await update.effective_message.reply_text("❌ Your account is locked. Contact admin.")
+        return
+
 
     # Check Registration
     if not load_player(update.effective_user.id):
@@ -858,6 +977,13 @@ async def buy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Usage: `/buy Item Name`")
         return
+
+    if p and p.get('is_locked'):
+    # This works for both messages and button clicks!
+        await update.effective_message.reply_text("❌ Your account is locked. Contact admin.")
+        return
+
+
 
     # Check Registration
     if not load_player(update.effective_user.id):
@@ -911,6 +1037,12 @@ async def use_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Usage: `/use Item Name`")
         return
+
+    if p and p.get('is_locked'):
+    # This works for both messages and button clicks!
+        await update.effective_message.reply_text("❌ Your account is locked. Contact admin.")
+        return
+
 
     # Check Registration
     if not load_player(update.effective_user.id):
@@ -973,6 +1105,12 @@ async def myteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ This command can only be used in private messages (DM).")
         return
 
+    if p and p.get('is_locked'):
+    # This works for both messages and button clicks!
+        await update.effective_message.reply_text("❌ Your account is locked. Contact admin.")
+        return
+
+
     # Check Registration
     if not load_player(update.effective_user.id):
         await update.message.reply_text("⚠️ You must start your journey first! Use /start.")
@@ -986,6 +1124,7 @@ async def myteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def manage_team(query, p):
     chars = p.get("characters", [])
+    
     if not chars:
         await query.answer("You have no pirates! Use /wheel first.", show_alert=True)
         return
@@ -1285,18 +1424,55 @@ async def show_move_selection(query, battle_id, log="", context=None):
 async def main_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     uid = str(query.from_user.id)
+    data = query.data  # Define this FIRST so it can be used in checks
     
+    # 1. Load Player & Check Registration
+    p = load_player(uid)
+    if not p and not data.startswith("choose_") and not data.startswith("v:"):
+        await query.answer("⚠️ Start your journey first! Use /start.", show_alert=True)
+        return
+
+    # 2. Universal Spam Protection (2s as you set)
     spamming, wait_time = await is_spamming(uid, 2)
     if spamming:
-        await query.answer(f"⏳ Slow down! Wait {wait_time}s...", show_alert=True)
+        await query.answer(f"⏳ Slow down! Wait {wait_time}s...", show_alert=False)
         return
-    # Check Registration for interaction
-    if not load_player(uid) and not data.startswith("choose_") and not data.startswith("start_"):
-        await query.answer("⚠️ You must start your journey first! Use /start.", show_alert=True)
+
+    # 3. Global Security Lock
+    # Stop locked users from doing anything EXCEPT the verification check
+    if p and p.get('is_locked') and not data.startswith("v:"):
+        await query.answer("🚫 Account Locked! Contact Admin.", show_alert=True)
         return
-    
-    data = query.data
-    p = get_player(uid)
+
+    # 4. Marine Security Verification Logic
+    if data.startswith("v:"):
+        _, is_correct, target_uid = data.split(":")
+        
+        if uid != target_uid:
+            await query.answer("❌ This check isn't for you!", show_alert=True)
+            return
+
+        if not p or not p.get('verification_active'): 
+            await query.answer("⌛ This check has expired.")
+            await query.message.delete()
+            return
+
+        if is_correct == "1":
+            p['verification_active'] = False
+            save_player(uid, p)
+            await query.edit_message_text("✅ **Verification Passed!**\nContinue your journey.")
+        else:
+            p['is_locked'] = True
+            p['verification_active'] = False
+            save_player(uid, p)
+            await query.edit_message_text("🚫 **ACCOUNT LOCKED.**\nContact owner to prove your identity.")
+            
+            await context.bot.send_message(
+                chat_id="-5178096636",
+                text=f"🚨 **BOT ALERT**\n👤: `{p.get('name')}`\n🆔: `{uid}`\n❌: Failed Emoji\n👉 `/unlock {uid}`",
+                parse_mode="Markdown"
+            )
+        return
 
     if data == "none":
         await query.answer("Ultimate can only be used once!")
@@ -1494,6 +1670,12 @@ async def wheel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ You must start your journey first! Use /start.")
         return
 
+    if p and p.get('is_locked'):
+    # This works for both messages and button clicks!
+        await update.effective_message.reply_text("❌ Your account is locked. Contact admin.")
+        return
+
+
     desc = "🎡 **PIRATE WHEELS** 🎡\n\nChoose the wheel you want to spin!"
     kb = [[InlineKeyboardButton("Character Wheel 👤", callback_data="char_wheel")], [InlineKeyboardButton("Resource Wheel 💎", callback_data="res_wheel")]]
     await update.message.reply_video(WHEEL_VIDEO, caption=desc, reply_markup=InlineKeyboardMarkup(kb))
@@ -1596,6 +1778,11 @@ async def inspect_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = " ".join(context.args).title()
     p = get_player(update.effective_user.id)
 
+    if p and p.get('is_locked'):
+    # This works for both messages and button clicks!
+        await update.effective_message.reply_text("❌ Your account is locked. Contact admin.")
+        return
+
     if name in WEAPONS:
         w = WEAPONS[name]
         text = (f"➥Name: {name}\n➥Rarity: {w['rarity']}\n➥Attack: {w['atk_range']}\n"
@@ -1634,6 +1821,12 @@ async def myprofile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not load_player(update.effective_user.id):
         await update.message.reply_text("⚠️ You must start your journey first! Use /start.")
         return
+
+    if p and p.get('is_locked'):
+    # This works for both messages and button clicks!
+        await update.effective_message.reply_text("❌ Your account is locked. Contact admin.")
+        return
+
 
     user_id = update.effective_user.id; p = get_player(user_id, update.effective_user.first_name)
     lvl = p.get('level', 1); exp = p.get('exp', 0); req = get_required_player_exp(lvl)
@@ -1674,6 +1867,12 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ You must start your journey first! Use /start.")
         return
 
+    if p and p.get('is_locked'):
+    # This works for both messages and button clicks!
+        await update.effective_message.reply_text("❌ Your account is locked. Contact admin.")
+        return
+
+
     p = get_player(update.effective_user.id)
     if not context.args: return
     name = " ".join(context.args).title()
@@ -1691,6 +1890,12 @@ async def mycollection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not p:
         await update.message.reply_text("⚠️ You must start your journey first! Use /start.")
         return
+
+    if p and p.get('is_locked'):
+    # This works for both messages and button clicks!
+        await update.effective_message.reply_text("❌ Your account is locked. Contact admin.")
+        return
+
 
     txt = "📜 **YOUR PIRATE FLEET** 📜\n━━━━━━━━━━━━━━━━━━━\n\n"
     
