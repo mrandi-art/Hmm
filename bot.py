@@ -513,6 +513,7 @@ def get_scaled_stats(char_obj, player_fruit=None):
 # CORE UTILS
 # =====================
 async def is_spamming(user_id, cooldown_seconds=3):
+    p = get_player(user_id)
     current_time = time.time()
     last_time = BUTTON_COOLDOWNS.get(user_id, 0)
     
