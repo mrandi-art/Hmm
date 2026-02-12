@@ -247,16 +247,16 @@ MOVES = {
 }
 
 CHARACTERS = {
-    "Alvida": {"rarity": "Common⬜️", "class": "Tank🛡", "hp": 600, "atk_min": 22, "atk_max": 22, "def": 30, "spe": 30, "moves": ["Kanabo smash", "Slip Slip punch"], "ult": "Sube sube no mi"},
-    "Chopper": {"rarity": "Rare🟦", "class": "Healer🧚‍♂", "hp": 700, "atk_min": 30, "atk_max": 35, "def": 40, "spe": 25, "moves": ["Heavy gong", "Kung fu point"], "ult": "Kokutei Roseo Metal"},
-    "Arlong": {"rarity": "Rare🟦", "class": "Damage dealer⚔", "hp": 660, "atk_min": 40, "atk_max": 45, "def": 30, "spe": 35, "moves": ["Shark teeth", "Shark on dart"], "ult": "Kiribachi"},
-    "Koby": {"rarity": "Common⬜️", "class": "Assassin 🥷", "hp": 550, "atk_min": 25, "atk_max": 25, "def": 20, "spe": 35, "moves": ["Kamisoro", "Tempest Kick"], "ult": "Honesty impact"},
-    "Usopp": {"rarity": "Rare🟦", "class": "Healer 🧚‍♂", "hp": 650, "atk_min": 35, "atk_max": 40, "def": 40, "spe": 30, "moves": ["Skull Bomb grass", "Impact wolf"], "ult": "Usopp hammer"},
-    "Buggy": {"rarity": "Rare🟦", "class": "Damage dealer ⚔", "hp": 620, "atk_min": 40, "atk_max": 45, "def": 25, "spe": 35, "moves": ["Chop Chop canon", "Chop Chop buzzsaw"], "ult": "Bara Bara festival"},
-    "Helmeppo": {"rarity": "Rare🟦", "class": "Assassin 🥷", "hp": 680, "atk_min": 35, "atk_max": 35, "def": 30, "spe": 45, "moves": ["Sword swing", "Dual Kukri"], "ult": "Firey morale"},
-    "Nami": {"rarity": "Rare🟦", "class": "Support💪", "hp": 600, "atk_min": 25, "atk_max": 30, "def": 35, "spe": 25, "moves": ["Thunderbolt Tempo", "Swing Arm"], "ult": "Zeus breeze tempo"},
-    "Yamato": {"rarity": "Legendary🟨", "class": "Assassin", "hp": 900, "atk_min": 50, "atk_max": 60, "def": 60, "spe": 50, "moves": ["Namuji Hyoga", "Namuji glacier fang"], "ult": "Thunder Bagua"},
-    "Eustass Kid": {"rarity": "Legendary🟨", "class": "Damage dealer⚔", "hp": 850, "atk_min": 60, "atk_max": 70, "def": 65, "spe": 40, "moves": ["Riperu", "Punk Gibson"], "ult": "Damned Punk"}
+    "Alvida": {"rarity": "Common", "class": "Tank🛡", "hp": 600, "atk_min": 22, "atk_max": 22, "def": 30, "spe": 30, "moves": ["Kanabo smash"], "ult": "Sube sube no mi"},
+    "Chopper": {"rarity": "Rare", "class": "Healer🧚‍♂", "hp": 700, "atk_min": 30, "atk_max": 35, "def": 40, "spe": 25, "moves": ["Heavy gong"], "ult": "Kokutei Roseo Metal"},
+    "Arlong": {"rarity": "Rare", "class": "Damage dealer⚔", "hp": 660, "atk_min": 40, "atk_max": 45, "def": 30, "spe": 35, "moves": ["Shark teeth"], "ult": "Kiribachi"},
+    "Koby": {"rarity": "Common", "class": "Assassin 🥷", "hp": 550, "atk_min": 25, "atk_max": 25, "def": 20, "spe": 35, "moves": ["Kamisoro"], "ult": "Honesty impact"},
+    "Usopp": {"rarity": "Rare", "class": "Healer 🧚‍♂", "hp": 650, "atk_min": 35, "atk_max": 40, "def": 40, "spe": 30, "moves": ["Skull Bomb grass"], "ult": "Usopp hammer"},
+    "Buggy": {"rarity": "Rare", "class": "Damage dealer ⚔", "hp": 620, "atk_min": 40, "atk_max": 45, "def": 25, "spe": 35, "moves": ["Chop Chop canon"], "ult": "Bara Bara festival"},
+    "Helmeppo": {"rarity": "Rare", "class": "Assassin 🥷", "hp": 680, "atk_min": 35, "atk_max": 35, "def": 30, "spe": 45, "moves": ["Sword swing"], "ult": "Firey morale"},
+    "Nami": {"rarity": "Rare", "class": "Support💪", "hp": 600, "atk_min": 25, "atk_max": 30, "def": 35, "spe": 25, "moves": ["Thunderbolt Tempo"], "ult": "Zeus breeze tempo"},
+    "Yamato": {"rarity": "Legendary", "class": "Assassin", "hp": 900, "atk_min": 50, "atk_max": 60, "def": 60, "spe": 50, "moves": ["Namuji Hyoga"], "ult": "Thunder Bagua"},
+    "Eustass Kid": {"rarity": "Legendary", "class": "Damage dealer⚔", "hp": 850, "atk_min": 60, "atk_max": 70, "def": 65, "spe": 40, "moves": ["Riperu"], "ult": "Damned Punk"}
 }
 
 EXPLORE_DATA = {
