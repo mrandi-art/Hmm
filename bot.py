@@ -720,7 +720,7 @@ async def explore_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     p = get_player(update.effective_user.id)
     uid = str(p['user_id'])
-
+    p['last_interaction'] = time.time()
     if p and p.get('is_locked'):
     # This works for both messages and button clicks!
         await update.effective_message.reply_text("❌ Your account is locked. Contact admin.")
@@ -1445,7 +1445,7 @@ async def main_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if spamming:
         await query.answer(f"⏳ Slow down! Wait {wait_time}s...", show_alert=False)
         return
-
+    if p: p['last_interaction'] = time.time()
     # 3. Global Security Lock
     # Stop locked users from doing anything EXCEPT the verification check
     if p and p.get('is_locked') and not data.startswith("v:"):
