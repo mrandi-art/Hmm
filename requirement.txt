@@ -1,0 +1,14 @@
+# Main library for Telegram Bot (latest stable version)
+python-telegram-bot==21.10
+
+# Required for making web requests (the bot's engine)
+httpx>=0.27,<0.29
+
+# Recommended for scheduling tasks (e.g., sending messages every hour)
+APScheduler==3.10.4
+
+# Optional: To use the JobQueue feature in the bot
+python-telegram-bot[job-queue]
+
+# For managing secret API tokens safely
+python-dotenv==1.0.1
