@@ -601,16 +601,42 @@ async def security_timeout(context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logging.error(f"Timeout logic failed for {uid}: {e}")
 
-async def unlock_cmd(update, context):
-    if str(update.effective_user.id) not in ADMIN_IDS: return
-    
-    target_id = context.args[0]
-    p = get_player(target_id)
-    if p:
+async def unlock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 1. Security Check: Only allow Admins to use this
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("🚫 Access Denied: Admins only.")
+        return
+
+    # 2. Argument Check: Did they provide a User ID?
+    if not context.args:
+        await update.message.reply_text("⚠️ Usage: `/unlock <user_id>`")
+        return
+
+    try:
+        target_id = str(context.args[0])
+        p = load_player(target_id)
+        
+        if not p:
+            await update.message.reply_text("⚠️ Player not found.")
+            return
+
+        # 3. The Unlock Logic
         p['is_locked'] = False
+        p['verification_active'] = False
+        p['last_interaction'] = 0 # Reset timer so they don't get checked instantly
         save_player(target_id, p)
-        await update.message.reply_text(f"✅ User `{target_id}` unlocked.")
-        await context.bot.send_message(chat_id=target_id, text="🔓 **Your account has been unlocked!**")
+        
+        # 4. Success Messages
+        await update.message.reply_text(f"✅ User `{p['name']}` ({target_id}) has been UNLOCKED.")
+        
+        try:
+            await context.bot.send_message(chat_id=target_id, text="🔓 **Account Unlocked!**\nThe Marine Security lock has been lifted. You may continue.")
+        except:
+            await update.message.reply_text("⚠️ User unlocked, but could not DM them (they might have blocked the bot).")
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
 
 def get_player(user_id, username=None):
     uid = str(user_id)
