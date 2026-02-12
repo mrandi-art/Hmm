@@ -11,9 +11,15 @@ from datetime import datetime
 from dotenv import load_dotenv
 load_dotenv()
 
+import dns.resolver
+
+# Fix for Termux/Android missing /etc/resolv.conf
+dns.resolver.default_resolver = dns.resolver.Resolver(configure=False)
+dns.resolver.default_resolver.nameservers = ['8.8.8.8', '8.8.4.4']
+
 from pymongo import MongoClient
 from telegram.request import HTTPXRequest
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, InputMediaPhoto, InputMediaVideo
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, InputMediaPhoto, InputMediaVideo, ReplyKeyboardMarkup, ReplyKeyboardRemove, constants
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -22,7 +28,44 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+# Global dictionary to keep player data in RAM
+player_cache = {}
+BUTTON_COOLDOWNS = {}
+RARITY_STYLES = {
+    "Common": {"symbol": "🔘", "label": "🔘 Common"},
+    "Rare": {"symbol": "🔮", "label": "🔮 Rare"},
+    "Legendary": {"symbol": "⚜️", "label": "⚜️ Legendary"}
+}
 
+RIDDLES = [
+    # --- BASICS ---
+    {"hint": "the object to stop a ship 🛑", "correct": "⚓️", "options": ["⚔️", "⚓️", "🧭"]},
+    {"hint": "the weapon of a true swordsman 🤺", "correct": "⚔️", "options": ["🏹", "⚔️", "🛡"]},
+    {"hint": "what you need to steer the ship ☸️", "correct": "☸️", "options": ["🛶", "⚓️", "☸️"]},
+    {"hint": "the Jolly Roger flag 🏴‍☠️", "correct": "🏴‍☠️", "options": ["🚩", "🏳️", "🏴‍☠️"]},
+    {"hint": "used to find treasure 🗺️", "correct": "🗺️", "options": ["📜", "🗺️", "🔭"]},
+    {"hint": "used to spot land from afar 🔭", "correct": "🔭", "options": ["🔫", "🔭", "🕯️"]},
+    
+    # --- ONE PIECE LORE ---
+    {"hint": "the fruit that gives powers 🍇", "correct": "😈", "options": ["🍎", "😈", "🍌"]},
+    {"hint": "the currency of the seas 💰", "correct": "🍇", "options": ["🍇", "💵", "💎"]},
+    {"hint": "Luffy's favorite food 🍖", "correct": "🍖", "options": ["🍜", "🍖", "🍙"]},
+    {"hint": "Zoro's drink of choice 🍶", "correct": "🍶", "options": ["🥛", "🍶", "🍵"]},
+    {"hint": "Nami's favorite fruit 🍊", "correct": "🍊", "options": ["🍊", "🍒", "🍑"]},
+    {"hint": "Sanji's weapon (his legs) 🦵", "correct": "🦵", "options": ["👊", "🦵", "🗡️"]},
+    {"hint": "Chopper's favorite sweet 🍬", "correct": "🍬", "options": ["🍬", "🍰", "🍫"]},
+    {"hint": "Franky's fuel source 🥤", "correct": "🥤", "options": ["⛽", "🥤", "☕"]},
+    
+    # --- COMBAT & ITEMS ---
+    {"hint": "protects you from attacks 🛡️", "correct": "🛡️", "options": ["🛡️", "⚔️", "🧶"]},
+    {"hint": "fires explosive balls 💣", "correct": "💣", "options": ["🎱", "💣", "🏺"]},
+    {"hint": "a sniper's best friend 🎯", "correct": "🏹", "options": ["🏹", "🎣", "🦯"]},
+    {"hint": "the Log Pose compass 🧭", "correct": "🧭", "options": ["⌚", "🧭", "⏲️"]},
+    {"hint": "a Marine ship 🛳️", "correct": "🛳️", "options": ["🛳️", "⛵", "🛶"]},
+    {"hint": "the treasure chest 📦", "correct": "📦", "options": ["📦", "📪", "🧱"]}
+]
+
+ADMIN_IDS = [5242138546 , 7708811819]
 # =====================
 # LOGGING SETUP
 # =====================
@@ -37,17 +80,24 @@ logging.basicConfig(
 
 MONGO_URI = os.getenv("MONGO_URI")
 
-# Initialize Client
+# Initialize Client with Speed Optimizations
 try:
     if MONGO_URI:
-        mongo_client = MongoClient(MONGO_URI)
+        # maxPoolSize allows multiple database tasks at once
+        # retryWrites handles brief mobile signal drops automatically
+        mongo_client = MongoClient(
+            MONGO_URI, 
+            serverSelectionTimeoutMS=5000, 
+            maxPoolSize=50, 
+            retryWrites=True
+        )
         # Verify connection immediately
         mongo_client.admin.command('ping')
         db = mongo_client["pirate_v3"]
         players_collection = db["players"]
         print("✅ Connected to MongoDB Atlas successfully.")
     else:
-        print("⚠️ MONGO_URI not found in environment. Database connection will fail.")
+        print("⚠️ MONGO_URI not found in environment.")
         mongo_client = None
         players_collection = None
 except Exception as e:
@@ -58,37 +108,69 @@ except Exception as e:
 def init_db():
     if mongo_client:
         try:
-            mongo_client.admin.command('ping')
+            db = mongo_client["pirate_v3"]
+            # Create a UNIQUE INDEX on user_id
+            # This is the BIGGEST speed boost: it prevents the bot from 
+            # scanning the whole DB every time a command is used.
+            db["players"].create_index("user_id", unique=True)
+            print("✅ Database index created/verified.")
         except Exception as e:
             print(f"Database connection warning: {e}")
 
+def load_player(user_id):
+    uid = str(user_id)
+    # 1. Check RAM first (Instant)
+    if uid in player_cache:
+        return player_cache[uid]
+        
+    if players_collection is None: 
+        return None
+        
+    try:
+        # 2. Get from DB (Slow)
+        data = players_collection.find_one({"user_id": uid}, {"_id": 0})
+        
+        if data:
+            # 3. SAFETY NET: Inject fields if missing for old players
+            updated = False
+            if "is_locked" not in data:
+                data["is_locked"] = False
+                updated = True
+            if "verification_active" not in data:
+                data["verification_active"] = False
+                updated = True
+            
+            # If we fixed an old record, save it back to DB immediately
+            if updated:
+                players_collection.update_one({"user_id": uid}, {"$set": data})
+                logging.info(f"Fixed missing security fields for old player {uid}")
+
+            # 4. Store in RAM for ultra-fast access
+            player_cache[uid] = data 
+            return data
+            
+        return data
+    except Exception as e:
+        logging.error(f"Error loading player {user_id}: {e}")
+        return None
+
+
 def save_player(user_id, player_data):
+    uid = str(user_id)
+    # Update RAM first (Instant)
+    player_cache[uid] = player_data
+    
     if players_collection is None: return
     try:
-        player_data['user_id'] = str(user_id)
-        # Remove _id if present to avoid immutable field error on update
-        if '_id' in player_data:
-            del player_data['_id']
+        # Update DB in the background
         players_collection.update_one(
-            {"user_id": str(user_id)},
+            {"user_id": uid},
             {"$set": player_data},
             upsert=True
         )
     except Exception as e:
-        print(f"Error saving player {user_id}: {e}")
+        logging.error(f"Error saving player {user_id}: {e}")
 
-def load_player(user_id):
-    if players_collection is None: return None
-    try:
-        data = players_collection.find_one({"user_id": str(user_id)})
-        if data:
-            if '_id' in data:
-                del data['_id']
-            return data
-        return None
-    except Exception as e:
-        print(f"Error loading player {user_id}: {e}")
-        return None
 
 init_db()
 
@@ -96,7 +178,6 @@ init_db()
 # CONSTANTS & STATS
 # =====================
 
-ADMIN_IDS = [5242138546]
 WHEEL_VIDEO = "BAACAgUAAyEFAATl0UgqAAIeZWmFStczJlfo5LnlJVRzeWuUtoSLAAJtIAACMx4pVKMk-1-9BG_3OAQ"
 YAMATO_ULT_VIDEO = "BAACAgUAAxkBAAIr1WmAKRpP7UEXoxx58xwDRtc65mzSAALQGQACW_z5V441GyK7BGOqOAQ"
 KID_ULT_VIDEO = "BAACAgUAAxkBAAIuemmCBZpyHB8s96nGwTuTrPhrqeDlAAKYIwACukcJVL9MKAIltY9HOAQ"
@@ -240,16 +321,16 @@ MOVES = {
 }
 
 CHARACTERS = {
-    "Alvida": {"rarity": "Common⬜️", "class": "Tank🛡", "hp": 600, "atk_min": 22, "atk_max": 22, "def": 30, "spe": 30, "moves": ["Kanabo smash", "Slip Slip punch"], "ult": "Sube sube no mi"},
-    "Chopper": {"rarity": "Rare🟦", "class": "Healer🧚‍♂", "hp": 700, "atk_min": 30, "atk_max": 35, "def": 40, "spe": 25, "moves": ["Heavy gong", "Kung fu point"], "ult": "Kokutei Roseo Metal"},
-    "Arlong": {"rarity": "Rare🟦", "class": "Damage dealer⚔", "hp": 660, "atk_min": 40, "atk_max": 45, "def": 30, "spe": 35, "moves": ["Shark teeth", "Shark on dart"], "ult": "Kiribachi"},
-    "Koby": {"rarity": "Common⬜️", "class": "Assassin 🥷", "hp": 550, "atk_min": 25, "atk_max": 25, "def": 20, "spe": 35, "moves": ["Kamisoro", "Tempest Kick"], "ult": "Honesty impact"},
-    "Usopp": {"rarity": "Rare🟦", "class": "Healer 🧚‍♂", "hp": 650, "atk_min": 35, "atk_max": 40, "def": 40, "spe": 30, "moves": ["Skull Bomb grass", "Impact wolf"], "ult": "Usopp hammer"},
-    "Buggy": {"rarity": "Rare🟦", "class": "Damage dealer ⚔", "hp": 620, "atk_min": 40, "atk_max": 45, "def": 25, "spe": 35, "moves": ["Chop Chop canon", "Chop Chop buzzsaw"], "ult": "Bara Bara festival"},
-    "Helmeppo": {"rarity": "Rare🟦", "class": "Assassin 🥷", "hp": 680, "atk_min": 35, "atk_max": 35, "def": 30, "spe": 45, "moves": ["Sword swing", "Dual Kukri"], "ult": "Firey morale"},
-    "Nami": {"rarity": "Rare🟦", "class": "Support💪", "hp": 600, "atk_min": 25, "atk_max": 30, "def": 35, "spe": 25, "moves": ["Thunderbolt Tempo", "Swing Arm"], "ult": "Zeus breeze tempo"},
-    "Yamato": {"rarity": "Legendary🟨", "class": "Assassin", "hp": 900, "atk_min": 50, "atk_max": 60, "def": 60, "spe": 50, "moves": ["Namuji Hyoga", "Namuji glacier fang"], "ult": "Thunder Bagua"},
-    "Eustass Kid": {"rarity": "Legendary🟨", "class": "Damage dealer⚔", "hp": 850, "atk_min": 60, "atk_max": 70, "def": 65, "spe": 40, "moves": ["Riperu", "Punk Gibson"], "ult": "Damned Punk"}
+    "Alvida": {"rarity": "Common", "class": "Tank🛡", "hp": 600, "atk_min": 22, "atk_max": 22, "def": 30, "spe": 30, "moves": ["Kanabo smash"], "ult": "Sube sube no mi"},
+    "Chopper": {"rarity": "Rare", "class": "Healer🧚‍♂", "hp": 700, "atk_min": 30, "atk_max": 35, "def": 40, "spe": 25, "moves": ["Heavy gong"], "ult": "Kokutei Roseo Metal"},
+    "Arlong": {"rarity": "Rare", "class": "Damage dealer⚔", "hp": 660, "atk_min": 40, "atk_max": 45, "def": 30, "spe": 35, "moves": ["Shark teeth"], "ult": "Kiribachi"},
+    "Koby": {"rarity": "Common", "class": "Assassin 🥷", "hp": 550, "atk_min": 25, "atk_max": 25, "def": 20, "spe": 35, "moves": ["Kamisoro"], "ult": "Honesty impact"},
+    "Usopp": {"rarity": "Rare", "class": "Healer 🧚‍♂", "hp": 650, "atk_min": 35, "atk_max": 40, "def": 40, "spe": 30, "moves": ["Skull Bomb grass"], "ult": "Usopp hammer"},
+    "Buggy": {"rarity": "Rare", "class": "Damage dealer ⚔", "hp": 620, "atk_min": 40, "atk_max": 45, "def": 25, "spe": 35, "moves": ["Chop Chop canon"], "ult": "Bara Bara festival"},
+    "Helmeppo": {"rarity": "Rare", "class": "Assassin 🥷", "hp": 680, "atk_min": 35, "atk_max": 35, "def": 30, "spe": 45, "moves": ["Sword swing"], "ult": "Firey morale"},
+    "Nami": {"rarity": "Rare", "class": "Support💪", "hp": 600, "atk_min": 25, "atk_max": 30, "def": 35, "spe": 25, "moves": ["Thunderbolt Tempo"], "ult": "Zeus breeze tempo"},
+    "Yamato": {"rarity": "Legendary", "class": "Assassin", "hp": 900, "atk_min": 50, "atk_max": 60, "def": 60, "spe": 50, "moves": ["Namuji Hyoga"], "ult": "Thunder Bagua"},
+    "Eustass Kid": {"rarity": "Legendary", "class": "Damage dealer⚔", "hp": 850, "atk_min": 60, "atk_max": 70, "def": 65, "spe": 40, "moves": ["Riperu"], "ult": "Damned Punk"}
 }
 
 EXPLORE_DATA = {
@@ -398,12 +479,14 @@ def check_player_levelup(p):
     req = get_required_player_exp(lvl)
     levels_gained = 0
 
+    # Ensure we don't exceed level 100
     while exp >= req and lvl < 100:
         exp -= req
         lvl += 1
         levels_gained += 1
         req = get_required_player_exp(lvl)
-        # Apply rewards per level up
+        
+        # Apply your specific rewards per level gained
         p['clovers'] = p.get('clovers', 0) + 10
         p['berries'] = p.get('berries', 0) + 500
         p['bounty'] = p.get('bounty', 0) + 40
@@ -411,6 +494,7 @@ def check_player_levelup(p):
     p['level'] = lvl
     p['exp'] = exp
     return levels_gained
+
 
 def check_char_levelup(char):
     lvl = char.get('level', 1)
@@ -449,11 +533,194 @@ def get_scaled_stats(char_obj, player_fruit=None):
 # =====================
 # CORE UTILS
 # =====================
+async def is_spamming(user_id, cooldown_seconds=3):
+    p = get_player(user_id)
+    current_time = time.time()
+    last_time = BUTTON_COOLDOWNS.get(user_id, 0)
+    
+    if current_time - last_time < cooldown_seconds:
+        return True, int(cooldown_seconds - (current_time - last_time))
+    
+    BUTTON_COOLDOWNS[user_id] = current_time
+    return False, 0
+
+async def trigger_security_check(user_id, context):
+    p = get_player(user_id)
+    riddle = random.choice(RIDDLES)
+    
+    # 1. Update State First
+    p['verification_active'] = True
+    save_player(user_id, p) # Save immediately so they can't dodge by restarting app
+    
+    # Randomize button order
+    options = riddle['options'].copy()
+    random.shuffle(options)
+    
+    keyboard = []
+    for opt in options:
+        # Data format: verify:is_correct:user_id
+        is_correct = "1" if opt == riddle['correct'] else "0"
+        keyboard.append(InlineKeyboardButton(opt, callback_data=f"v:{is_correct}:{user_id}"))
+
+    # FIXED: Use single * for bold in standard Markdown
+    text = (
+        f"⚠️ *MARINE SECURITY CHECK!*\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"Identify *{riddle['hint']}* within 30 seconds!\n"
+        f"━━━━━━━━━━━━━━━━━━━"
+    )
+    
+    try:
+        msg = await context.bot.send_message(
+            chat_id=user_id, 
+            text=text, 
+            reply_markup=InlineKeyboardMarkup([keyboard]), 
+            parse_mode="Markdown"
+        )
+        
+        # Auto-lock after 15 seconds if still active
+        context.job_queue.run_once(
+            security_timeout, 
+            30, 
+            data={'user_id': user_id, 'msg_id': msg.message_id}
+        )
+        
+    except Exception as e:
+        # If user blocked bot, reset their verify status so they don't get stuck
+        p['verification_active'] = False
+        save_player(user_id, p)
+        logging.warning(f"Could not send security check to {user_id}: {e}")
+
+
+async def security_timeout(context: ContextTypes.DEFAULT_TYPE):
+    job_data = context.job.data
+    uid = job_data['user_id']
+    msg_id = job_data['msg_id']
+    
+    p = get_player(uid) # RAM Fetch
+    
+    # If they still have verification_active, it means they didn't click anything
+    if p and p.get('verification_active'):
+        p['verification_active'] = False
+        p['is_locked'] = True
+        save_player(uid, p) # Push to RAM and DB
+
+        try:
+            # Update the message so they know they are locked
+            await context.bot.edit_message_text(
+                chat_id=uid,
+                message_id=msg_id,
+                text="🚫 **ACCOUNT LOCKED (TIMEOUT)**\nYou failed to respond to the Marine Security Check. Contact admin."
+            )
+            
+            # Notify your Log Group
+            await context.bot.send_message(
+                chat_id="-1003855697962",
+                text=f"🚨 **BOT DETECTION (TIMEOUT)**\n👤: `{p.get('name')}`\n🆔: `{uid}`\n👉 `/unlock {uid}`",
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            logging.error(f"Timeout logic failed for {uid}: {e}")
+
+async def unlock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 1. Security Check: Only allow Admins
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("🚫 Access Denied: Admins only.")
+        return
+
+    # 2. Argument Check
+    if not context.args:
+        await update.message.reply_text("⚠️ Usage:\n`/unlock <id>` (Unlock one)\n`/unlock all` (Unlock EVERYONE)")
+        return
+
+    command_arg = context.args[0].lower()
+
+    # ==========================
+    # OPTION A: UNLOCK EVERYONE
+    # ==========================
+    if command_arg == "all":
+        await update.message.reply_text("🔄 **Unlocking ALL players...** (This may take a moment)")
+        
+        try:
+            # 🟢 FIXED: Using the correct name 'players_collection'
+            result = players_collection.update_many(
+                {"is_locked": True},
+                {"$set": {"is_locked": False, "verification_active": False, "last_interaction": 0}}
+            )
+            
+            # 2. Update RAM (Catches online players)
+            ram_count = 0
+            for uid in player_cache:
+                if player_cache[uid].get('is_locked'):
+                    player_cache[uid]['is_locked'] = False
+                    player_cache[uid]['verification_active'] = False
+                    player_cache[uid]['last_interaction'] = 0
+                    ram_count += 1
+            
+            # 3. Report
+            msg = (
+                f"✅ **GLOBAL UNLOCK COMPLETE**\n\n"
+                f"📂 Database Updated: {result.modified_count} players\n"
+                f"🧠 RAM Updated: {ram_count} active sessions\n"
+                f"🔓 Everyone is free to sail!"
+            )
+            await update.message.reply_text(msg)
+            
+            # Log to Admin Group
+            try:
+                await context.bot.send_message(
+                    chat_id="-1003855697962", 
+                    text=f"🚨 **GLOBAL UNLOCK** initiated by {update.effective_user.first_name}!"
+                )
+            except:
+                pass 
+            
+        except Exception as e:
+            await update.message.reply_text(f"❌ Database Error: {e}")
+        return
+
+    # ==========================
+    # OPTION B: UNLOCK SPECIFIC IDs
+    # ==========================
+    results = []
+    for target_id in context.args:
+        try:
+            clean_id = str(target_id).replace(",", "").strip()
+            p = load_player(clean_id)
+            
+            if not p:
+                results.append(f"⚠️ `{clean_id}`: Not found")
+                continue
+
+            # Unlock logic
+            p['is_locked'] = False
+            p['verification_active'] = False
+            p['last_interaction'] = 0 
+            save_player(clean_id, p)
+            
+            results.append(f"✅ `{p['name']}`: Unlocked")
+            
+            # Attempt DM
+            try:
+                await context.bot.send_message(chat_id=clean_id, text="🔓 **Account Unlocked!**\nThe Marine Security lock has been lifted.")
+            except:
+                pass 
+
+        except Exception as e:
+            results.append(f"❌ `{target_id}`: Error")
+
+    if results:
+        await update.message.reply_text("\n".join(results), parse_mode="Markdown")
 
 def get_player(user_id, username=None):
     uid = str(user_id)
+    
+    # 1. load_player now checks RAM first, making this instant
     p = load_player(uid)
+    
     if not p:
+        # Create new player template
         p = {
             "user_id": uid, "name": username or "Pirate", "team": [], "characters": [],
             "berries": 10000, "clovers": 0, "bounty": 0, "exp": 0, "level": 1,
@@ -462,7 +729,10 @@ def get_player(user_id, username=None):
             "explore_count": 0, "start_date": datetime.now().strftime("%Y-%m-%d"),
             "referred_by": None, "referrals": 0
         }
+        # Only save to DB for brand new registrations
+        save_player(uid, p)
     else:
+        # 2. Fill in missing keys (Migration logic) without hitting the DB
         defaults = {
             "user_id": uid, "team": [], "characters": [], "berries": 0, "clovers": 0, "bounty": 0,
             "exp": 0, "level": 1, "wins": 0, "losses": 0, "explore_wins": 0, "kill_count": 0,
@@ -470,17 +740,29 @@ def get_player(user_id, username=None):
             "explore_count": 0, "start_date": datetime.now().strftime("%Y-%m-%d"),
             "referred_by": None, "referrals": 0
         }
+        modified = False
         for k, v in defaults.items():
-            if k not in p: p[k] = v
+            if k not in p: 
+                p[k] = v
+                modified = True
+        
         if not p.get("name") or p["name"] == "Pirate":
-            if username: p["name"] = username
+            if username: 
+                p["name"] = username
+                modified = True
+        
+        # 3. Handle Admin Stats in RAM
+        if int(user_id) in ADMIN_IDS:
+            p["berries"] = max(p.get("berries", 0), 99999999)
+            p["clovers"] = max(p.get("clovers", 0), 99999999)
+            p["level"] = 100
+            modified = True
 
-    if int(user_id) in ADMIN_IDS:
-        p["berries"] = max(p.get("berries", 0), 99999999)
-        p["clovers"] = max(p.get("clovers", 0), 99999999)
-        p["level"] = 100
+        # Only save if we actually added missing default keys
+        if modified:
+            save_player(uid, p)
 
-    save_player(uid, p)
+    # 4. Return the RAM-cached object immediately
     return p
 
 def get_stats_text(char_obj_or_name, player_fruit=None):
@@ -496,14 +778,19 @@ def get_stats_text(char_obj_or_name, player_fruit=None):
     c = CHARACTERS.get(name)
     if not c: return "Character not found."
 
+    # Pull the full label from your RARITY_STYLES dictionary
+    rarity_info = RARITY_STYLES.get(c['rarity'], {"label": c['rarity']})
+    rarity_display = rarity_info['label']
+
     stats = get_scaled_stats({"name": name, "level": lvl}, player_fruit)
     ult_name = c['ult']
     ult_damage = MOVES[ult_name]['dmg']
     ult_desc = EFFECT_DESCRIPTIONS.get(name, "No additional effect.")
 
+    # UI Construction
     text = (
         f"《Name》: {name}\n"
-        f"《Rarity》: {c['rarity']}\n"
+        f"《Rarity》: {rarity_display}\n"
         f"《 Class》: {c['class']}\n"
         f"《Level》: {lvl}\n\n"
         f"      《STATS》\n"
@@ -512,13 +799,14 @@ def get_stats_text(char_obj_or_name, player_fruit=None):
         f"《SPE: {stats['spe']}\n"
         f"《 DEF: {stats['def']}\n\n"
         f"■ 《BASIC》: {c['moves'][0]}: Damage {MOVES[c['moves'][0]]['dmg']}\n"
-        f"● 《BASIC》: {c['moves'][1]}: Damage {MOVES[c['moves'][1]]['dmg']}\n"
         f"♤《 ULTIMATE》: {ult_name}: Damage {ult_damage}. {ult_desc}"
     )
+    
     if weapon:
         w_data = WEAPONS[weapon]
         text += f"\n⚔️ 《WEAPON》: {weapon}: {w_data['spec']} (Dmg: {w_data['atk_val']})"
     return text
+
 
 def generate_char_instance(name, level=1, player_fruit=None, equipped_weapon=None):
     c = CHARACTERS.get(name, {
@@ -555,6 +843,12 @@ async def explore_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     p = get_player(update.effective_user.id)
     uid = str(p['user_id'])
+    p['last_interaction'] = time.time()
+    if p and p.get('is_locked'):
+    # This works for both messages and button clicks!
+        await update.effective_message.reply_text("❌ Your account is locked. Contact admin.")
+        return
+
 
     # UPDATED: 2-minute cooldown logic for pending battles
     if uid in pending_explores:
@@ -629,14 +923,30 @@ async def explore_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Do you wish to engage in battle?"
         )
 
-    # UPDATED: Store timestamp
+    # UPDATED: Store timestamp"
     pending_explores[uid] = {'name': char_name, 'time': time.time()}
 
     kb = [
         [InlineKeyboardButton(f"Fight {char_name} ⚔", callback_data=f"efight_{char_name}")],
         [InlineKeyboardButton("📜 Missions", callback_data="show_missions")]
     ]
-    await update.message.reply_photo(img_id, caption=text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+
+    # 🛑 CRITICAL FIX: Wrap this in try/except to prevent crashes
+    try:
+        await update.message.reply_photo(
+            img_id, 
+            caption=text, 
+            reply_markup=InlineKeyboardMarkup(kb), 
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        # If the image ID is broken (like Blackbeard), this runs instead
+        logging.error(f"Image failed for {char_name}: {e}")
+        await update.message.reply_text(
+            f"⚠️ **IMAGE ERROR** ⚠️\n(The image for {char_name} is broken, but you can still fight!)\n\n{text}",
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode="Markdown"
+        )
 
 # =====================
 # STARTER, REFERRAL & NAV
@@ -665,60 +975,100 @@ async def show_starter_page(update, name, target_user_id):
             await update.message.reply_photo(img, caption=text, reply_markup=markup)
     except Exception: pass
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
-    # Check if exists first to welcome back, or create if new
-    existing_player = load_player(user_id)
-    p = get_player(user_id, update.effective_user.first_name)
 
-    # UPDATED: Referral Logic
-    if context.args and not existing_player and not p.get('referred_by'):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    username = update.effective_user.username or update.effective_user.first_name or "Pirate"
+    
+    # 1. Instant RAM Lookup
+    p = load_player(user_id) 
+    is_new = False
+
+    if p and p.get('is_locked'):
+    # This works for both messages and button clicks!
+        await update.effective_message.reply_text("❌ Your account is locked. Contact admin.")
+        return
+
+
+    if not p:
+        is_new = True
+        p = {
+            "user_id": user_id, "name": username, "team": [], "characters": [],
+            "berries": 10000, "clovers": 0, "bounty": 0, "exp": 0, "level": 1,
+            "starter_summoned": False, "wins": 0, "losses": 0, "explore_wins": 0, "kill_count": 0,
+            "fruits": [], "equipped_fruit": None, "tokens": 0, "weapons": [],
+            "explore_count": 0, "start_date": datetime.now().strftime("%Y-%m-%d"),"is_locked": False,
+            "verification_active": False, "referred_by": None, "referrals": 0
+        }
+
+    # 2. Optimized Referral Logic
+    if is_new and context.args:
         try:
             referrer_id = str(context.args[0])
-            if referrer_id != str(user_id):
+            if referrer_id != user_id:
                 referrer = load_player(referrer_id)
                 if referrer:
-                    # Link users
                     p['referred_by'] = referrer_id
-
-                    # Reward New User
-                    p['berries'] = p.get('berries', 0) + 5000
-                    p['clovers'] = p.get('clovers', 0) + 50
-
-                    # Reward Referrer
-                    referrer['berries'] = referrer.get('berries', 0) + 10000
-                    referrer['clovers'] = referrer.get('clovers', 0) + 100
+                    p['berries'] += 5000
+                    p['clovers'] += 50
+                    
+                    referrer['berries'] += 10000
+                    referrer['clovers'] += 100
                     referrer['referrals'] = referrer.get('referrals', 0) + 1
 
-                    save_player(user_id, p)
+                    # Save referrer immediately to RAM
                     save_player(referrer_id, referrer)
 
-                    await update.message.reply_text(f"🤝 You were referred by {referrer['name']}! You received 5,000 🍇 and 50 🍀.")
+                    await update.message.reply_text(f"🤝 Referred by {referrer['name']}! Bonus: 5,000 🍇 + 50 🍀")
+                    
+                    # UPDATED: Notification including Clovers
                     try:
-                        await context.bot.send_message(chat_id=referrer_id, text=f"🤝 {p['name']} joined via your link! You received 10,000 🍇 and 100 🍀.")
+                        await context.bot.send_message(
+                            chat_id=referrer_id, 
+                            text=f"🤝 **{p['name']}** joined!\n🍇 `+10,000` Berries\n🍀 `+100` Clovers",
+                            parse_mode="Markdown"
+                        )
                     except: pass
-        except Exception: pass
+        except Exception as e:
+            logging.error(f"Referral logic error: {e}")
+
+    # 3. Final Save
+    save_player(user_id, p)
 
     if p.get("starter_summoned"):
         await update.message.reply_text(f"Welcome back Captain {p['name']}!")
         return
 
-    # Pass user_id to lock the selection
     await show_starter_page(update, "Usopp", user_id)
 
 async def referral_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     bot_username = context.bot.username
     link = f"https://t.me/{bot_username}?start={user_id}"
+    
+    p = get_player(user_id)
+    ref_count = p.get('referrals', 0)
+
+    if p and p.get('is_locked'):
+    # This works for both messages and button clicks!
+        await update.effective_message.reply_text("❌ Your account is locked. Contact admin.")
+        return
+
+
     text = (
-        f"📣 **INVITE FRIENDS**\n\n"
-        f"Share your link to earn rewards!\n\n"
-        f"🔗 ` {link} `\n\n"
-        f"**Your Rewards:** 10,000 🍇 + 100 🍀 per friend.\n"
-        f"**Friend's Rewards:** 5,000 🍇 + 50 🍀 starter bonus."
+        f"╭━━━━━━━━━━━━━━━╮\n"
+        f"✦    🤝 REFERRAL 🤝     ✦\n"
+        f"╰━━━━━━━━━━━━━━━╯\n\n"
+        f"Share your link to grow your fleet!\n\n"
+        f"🔗 **YOUR LINK:**\n`{link}`\n\n"
+        f"🎁 **REWARDS**\n"
+        f"• You get: 10,000 🍇 + 100 🍀\n"
+        f"• Friend gets: 5,000 🍇 + 50 🍀\n\n"
+        f"📊 **TOTAL RECRUITS:** `{ref_count}`"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
+
+
 
 # =====================
 # STORE & BUY SYSTEM
@@ -729,6 +1079,14 @@ async def store_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         await update.message.reply_text("⚠️ This command can only be used in private messages (DM).")
         return
+    uid = str(update.effective_user.id)
+    p = load_player(uid)
+    
+    if p and p.get('is_locked'):
+    # This works for both messages and button clicks!
+        await update.effective_message.reply_text("❌ Your account is locked. Contact admin.")
+        return
+
 
     # Check Registration
     if not load_player(update.effective_user.id):
@@ -761,6 +1119,15 @@ async def buy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Usage: `/buy Item Name`")
         return
+    uid = str(update.effective_user.id)
+    p = load_player(uid)
+    
+    if p and p.get('is_locked'):
+    # This works for both messages and button clicks!
+        await update.effective_message.reply_text("❌ Your account is locked. Contact admin.")
+        return
+
+
 
     # Check Registration
     if not load_player(update.effective_user.id):
@@ -814,6 +1181,14 @@ async def use_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Usage: `/use Item Name`")
         return
+    uid = str(update.effective_user.id)
+    p = load_player(uid)
+    
+    if p and p.get('is_locked'):
+    # This works for both messages and button clicks!
+        await update.effective_message.reply_text("❌ Your account is locked. Contact admin.")
+        return
+
 
     # Check Registration
     if not load_player(update.effective_user.id):
@@ -875,6 +1250,13 @@ async def myteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         await update.message.reply_text("⚠️ This command can only be used in private messages (DM).")
         return
+    uid = str(update.effective_user.id)
+    p = load_player(uid)
+    if p and p.get('is_locked'):
+    # This works for both messages and button clicks!
+        await update.effective_message.reply_text("❌ Your account is locked. Contact admin.")
+        return
+
 
     # Check Registration
     if not load_player(update.effective_user.id):
@@ -889,6 +1271,7 @@ async def myteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def manage_team(query, p):
     chars = p.get("characters", [])
+    
     if not chars:
         await query.answer("You have no pirates! Use /wheel first.", show_alert=True)
         return
@@ -978,88 +1361,71 @@ async def run_battle_turn(query, battle_id, move_name=None, context=None):
     p1_char = b['p1_team'][b['p1_idx']]
     p2_char = b['p2_team'][b['p2_idx']]
 
+    # Determine roles
     if b['turn_owner'] == "p1":
         attacker, defender, att_p, def_p, att_team = p1_char, p2_char, "p1", "p2", b['p1_team']
     else:
         attacker, defender, att_p, def_p, att_team = p2_char, p1_char, "p2", "p1", b['p2_team']
 
+    # 1. STUN LOGIC
     if attacker.get('stunned'):
         attacker['stunned'] = False
         log = f"💫 **{attacker['name']}** is stunned and skipped their turn!"
         b['turn_owner'] = def_p
         await show_move_selection(query, battle_id, log, context)
         if b.get('is_npc') and b['turn_owner'] == "p2":
-            await asyncio.sleep(2)
+            await asyncio.sleep(0.5) 
             await run_battle_turn(query, battle_id, move_name=None, context=context)
         return
 
+    # 2. NPC AI LOGIC (Snappy 0.5s response)
     if b.get('is_npc') and b['turn_owner'] == "p2":
-        move_name = random.choice(attacker['moves'] + ([attacker['ult']] if not attacker.get('ult_used') else []))
+        # Uses only moves[0] to prevent IndexError from old multi-move system
+        basic_move = attacker['moves'][0] 
+        if not attacker.get('ult_used') and random.random() < 0.3:
+            move_name = attacker['ult']
+        else:
+            move_name = basic_move
 
     if not move_name:
         await show_move_selection(query, battle_id, context=context)
         return
 
+    # 3. DODGE LOGIC
     if random.random() < (attacker.get('dodge_chance', 0) / 100):
         log = f"💨 **{defender['name']}** dodged the attack!"
         attacker['dodge_chance'] = 0
     else:
+        # 4. DAMAGE CALCULATION
         move_data = MOVES.get(move_name, MOVES["Strike"])
         is_ult = (move_name == attacker['ult'])
+        
         if is_ult:
             attacker['ult_used'] = True
             if attacker['name'] == "Yamato":
-                if b.get('is_npc'):
-                    try: await query.message.reply_photo(photo=YAMATO_EXPLORE_ULT, caption="⚡️ **YAMATO USES THUNDER BAGUA!**")
-                    except: pass
-                else:
-                    try: await query.message.reply_video(video=YAMATO_ULT_VIDEO, caption="⚡️ **YAMATO USES THUNDER BAGUA!**")
-                    except: pass
+                img = YAMATO_EXPLORE_ULT if b.get('is_npc') else YAMATO_ULT_VIDEO
+                try: await query.message.reply_photo(photo=img, caption="⚡️ **THUNDER BAGUA!**")
+                except: pass
             elif attacker['name'] == "Eustass Kid":
-                if b.get('is_npc'):
-                    try: await query.message.reply_photo(photo=KID_EXPLORE_ULT, caption="⚡️ **KID USES DAMNED PUNK!**")
-                    except: pass
-                else:
-                    try: await query.message.reply_video(video=KID_ULT_VIDEO, caption="⚡️ **KID USES DAMNED PUNK!**")
-                    except: pass
-            elif attacker['name'] in ULT_IMAGES:
-                try: await query.message.reply_photo(photo=ULT_IMAGES[attacker['name']], caption=f"⚡️ **{attacker['name'].upper()} USES {move_name.upper()}!**")
+                img = KID_EXPLORE_ULT if b.get('is_npc') else KID_ULT_VIDEO
+                try: await query.message.reply_photo(photo=img, caption="⚡️ **DAMNED PUNK!**")
                 except: pass
 
+        # Damage Formula using scaled stats
         damage = max(5, (random.randint(attacker.get('atk_min', 20), attacker.get('atk_max', 30)) + move_data['dmg'] + 120) - defender.get('def', 10))
         defender['hp'] -= damage
-        log = f"🔥 **{attacker['name']}** strikes with **{move_name}**!\n💥 Deals **{damage}** DMG!"
+        log = f"🔥 **{attacker['name']}** uses **{move_name}**!\n💥 Deals **{damage}** DMG!"
 
+        # 5. MOVE EFFECTS
         effect = move_data.get('effect')
         if effect:
             if effect == "def_buff_10": attacker['def'] += 10
             elif effect == "team_heal_50":
                 for char in att_team: char['hp'] = min(char['max_hp'], char['hp'] + 50)
-            elif effect == "atk_buff_15_2":
-                attacker['atk_min'] = int(attacker['atk_min'] * 1.15)
-                attacker['atk_max'] = int(attacker['atk_max'] * 1.15)
             elif effect == "dodge_30": attacker['dodge_chance'] = 30
-            elif effect == "usopp_ult":
-                defender['def'] = int(defender['def'] * 0.95)
-                attacker['hp'] = min(attacker['max_hp'], attacker['hp'] + 25)
-                defender['stunned'] = True
-            elif effect == "team_atk_5":
-                # UPDATED: Fixed bug where only min was increased, causing min > max and a crash
-                for char in att_team:
-                    char['atk_min'] = int(char['atk_min'] * 1.05)
-                    char['atk_max'] = int(char['atk_max'] * 1.05)
-            elif effect == "helmeppo_ult":
-                attacker['dodge_chance'] = 50
-                for char in att_team: char['spe'] = int(char['spe'] * 1.1)
             elif effect == "stun_1": defender['stunned'] = True
-            elif effect == "yamato_ult":
-                attacker['dodge_chance'] = 50
-                attacker['atk_min'] = int(attacker['atk_min'] * 1.1); attacker['def'] = int(attacker['def'] * 1.15)
-            elif effect == "kid_ult":
-                attacker['atk_min'] = int(attacker['atk_min'] * 1.25)
-                attacker['atk_max'] = int(attacker['atk_max'] * 1.25)
-                attacker['spe'] = int(attacker['spe'] * 1.1)
 
+    # 6. DEATH & REWARDS LOGIC (Ultra-Fast Cache Updates)
     if defender['hp'] <= 0:
         defender['hp'] = 0
         b[f'{def_p}_idx'] += 1
@@ -1068,99 +1434,77 @@ async def run_battle_turn(query, battle_id, move_name=None, context=None):
         if b[f'{def_p}_idx'] >= len(b[f'{def_p}_team']):
             winner_name = b['p1_name'] if def_p == "p2" else b['p2_name']
             loser_name = b['p2_name'] if def_p == "p2" else b['p1_name']
-
-            rank_up_msg = ""
+            rank_up_section = ""
 
             if b.get('is_npc'):
-                uid = b['p1_id']
+                uid = str(b['p1_id'])
                 if uid in pending_explores: del pending_explores[uid]
-                p1 = get_player(uid)
-                wins_at = p1.get('explore_wins', 0)
-
-                # Higher rewards for Boss fight
+                p = get_player(uid) # Instant RAM lookup
+                
+                # LOOT TABLE: Clovers restored
+                wins_at = p.get('explore_wins', 0)
                 if wins_at in BOSS_MISSIONS:
-                    exp_gain = random.randint(200, 300)
-                    berry_gain = random.randint(200, 250)
-                    clover_gain = random.randint(5, 10)
-                    bounty_gain = random.randint(100, 200)
+                    exp_gain, berry_gain, clover_gain, bounty_gain = random.randint(200,300), random.randint(200,250), random.randint(5,10), random.randint(100,200)
                 else:
-                    exp_gain = random.randint(50, 100)
-                    berry_gain = random.randint(50, 100)
-                    clover_gain = 0
-                    bounty_gain = random.randint(20, 30)
+                    exp_gain, berry_gain, clover_gain, bounty_gain = random.randint(50,100), random.randint(50,100), random.randint(1,3), random.randint(20,30)
+                
+                p['explore_wins'] += 1
+                p['exp'] += exp_gain; p['berries'] += berry_gain; p['clovers'] += clover_gain; p['bounty'] += bounty_gain
+                
+                # Update character-specific exp
+                for team_char in b['p1_team']:
+                    for main_char in p.get('characters', []):
+                        if main_char['name'] == team_char['name']:
+                            main_char['exp'] = main_char.get('exp', 0) + exp_gain
+                            check_char_levelup(main_char)
 
-                p1['explore_wins'] += 1
-                p1['kill_count'] += 1
-                p1['exp'] += exp_gain
-                p1['berries'] += berry_gain
-                p1['bounty'] += bounty_gain
-                p1['clovers'] += clover_gain
-
-                # UPDATED: Rank Up Check & Message
-                lvls = check_player_levelup(p1)
-                if lvls > 0:
-                    rank_up_msg = f"\n\nRank increased💫 to {p1['level']}\n\n+{10*lvls} 🍀 \n+{500*lvls} 🍇 \n+{40*lvls} bounty"
-
-                for tc in p1.get('team', []):
-                    for pc in p1['characters']:
-                        if pc['id'] == tc['id']:
-                            pc['exp'] = pc.get('exp', 0) + exp_gain
-                            check_char_levelup(pc)
-                save_player(uid, p1)
+                # LEVEL UP REWARDS (Separated Display)
+                lvls = check_player_levelup(p)
+                if lvls > 0: 
+                    rank_up_section = (
+                        f"\n\n🎊 **RANK UP!** You reached **Level {p['level']}**!\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"🎁 **LEVEL UP REWARDS**:\n"
+                        f"🍇 Berries: `+{lvls * 500}`\n"
+                        f"🍀 Clovers: `+{lvls * 10}`\n"
+                        f"฿ Bounty: `+{lvls * 40}`"
+                    )
+                
+                save_player(uid, p) # RAM update + Background DB sync
 
                 final_ui = (
                     f"◈☰☰☰⚔️ ＢＡＴＴＬＥ ＲＥＳＵＬＴ ⚔️☰☰☰◈\n\n"
-                    f"🏆 **{winner_name}** has defeated **{loser_name}**\n\n"
-                    f"🌟 EXP Gained: `{exp_gain}`\n"
-                    f"🍇 Berries: `{berry_gain}`\n"
-                    f"🍀 Clovers: `{clover_gain}`\n"
-                    f"฿ Bounty: `{bounty_gain}`"
-                    f"{rank_up_msg}"
+                    f"🏆 **{winner_name}** defeated **{loser_name}**!\n\n"
+                    f"📦 **LOOT DROPPED**:\n"
+                    f"🌟 EXP: `+{exp_gain}`\n"
+                    f"🍇 Berries: `+{berry_gain}`\n"
+                    f"🍀 Clovers: `+{clover_gain}`\n"
+                    f"฿ Bounty: `+{bounty_gain}`"
+                    f"{rank_up_section}"
                 )
             else:
-                # PvP Rewards as requested
-                exp_p = random.randint(50, 100)
-                berry_p = random.randint(50, 100)
-                bounty_p = random.randint(30, 50)
-
                 wp_id = b['p1_id'] if def_p == "p2" else b['p2_id']
-                lp_id = b['p1_id'] if def_p == "p1" else b['p2_id']
-                wp = get_player(wp_id); lp = get_player(lp_id)
-                wp['wins'] += 1; lp['losses'] += 1
-                wp['exp'] += exp_p; wp['berries'] += berry_p; wp['bounty'] += bounty_p
-
-                # UPDATED: Rank Up Check for PvP Winner
-                lvls = check_player_levelup(wp)
-                if lvls > 0:
-                    rank_up_msg = f"\n\nRank increased💫 to {wp['level']}\n\n+{10*lvls} 🍀 \n+{500*lvls} 🍇 \n+{40*lvls} bounty"
-
-                final_ui = (
-                    f"◈☰☰☰⚔️ ＢＡＴＴＬＥ ＲＥＳＵＬＴ ⚔️☰☰☰◈\n\n"
-                    f"🏆 **{winner_name}** triumphed over **{loser_name}**!\n\n"
-                    f"🎁 **REWARDS**:\n"
-                    f"🌟 EXP: `{exp_p}`\n"
-                    f"🍇 Berries: `{berry_p}`\n"
-                    f"฿ Bounty: `{bounty_p}`"
-                    f"{rank_up_msg}"
-                )
-
-                save_player(wp_id, wp); save_player(lp_id, lp)
-
-            try: await query.edit_message_text(final_ui, parse_mode="Markdown")
-            except:
-                try: await query.edit_message_caption(caption=final_ui, parse_mode="Markdown")
-                except: pass
+                wp = get_player(wp_id); wp['wins'] += 1; save_player(wp_id, wp)
+                final_ui = f"🏆 **{winner_name}** triumphed in PvP!"
 
             if battle_id in battles: del battles[battle_id]
-            return
 
+            # FIX: Use edit_message_caption to prevent 'no text to edit' crash on images
+            try:
+                await query.edit_message_caption(caption=final_ui, parse_mode="Markdown")
+            except Exception:
+                try: await query.edit_message_text(final_ui, parse_mode="Markdown")
+                except: await query.message.reply_text(final_ui)
+            return
+            
+    # 7. TURN ROTATION
     b['turn_owner'] = def_p
+    await show_move_selection(query, battle_id, log, context)
+    
     if b.get('is_npc') and b['turn_owner'] == "p2":
-        await show_move_selection(query, battle_id, log, context)
-        await asyncio.sleep(2)
+        await asyncio.sleep(0.5) 
         await run_battle_turn(query, battle_id, move_name=None, context=context)
-    else:
-        await show_move_selection(query, battle_id, log, context)
+
 
 async def show_move_selection(query, battle_id, log="", context=None):
     b = battles.get(battle_id)
@@ -1168,8 +1512,10 @@ async def show_move_selection(query, battle_id, log="", context=None):
     p1_char = b['p1_team'][b['p1_idx']]; p2_char = b['p2_team'][b['p2_idx']]
     attacker = b[b['turn_owner'] + '_team'][b[b['turn_owner'] + '_idx']]
 
-    move1, move2 = attacker['moves'][0], attacker['moves'][1]
-    spec_move = attacker['moves'][2] if len(attacker['moves']) > 2 else None
+    # Simplified to only take the first move
+    basic_move = attacker['moves'][0]
+    # Check if a weapon special move exists (it would be at index 2 or 1 depending on list length)
+    spec_move = attacker['moves'][2] if len(attacker['moves']) > 2 else (attacker['moves'][1] if len(attacker['moves']) > 1 else None)
 
     ult_name = attacker['ult']
     ult_desc = EFFECT_DESCRIPTIONS.get(attacker['name'], "Standard massive damage.")
@@ -1181,28 +1527,33 @@ async def show_move_selection(query, battle_id, log="", context=None):
         f"👤 **{b['p2_name'].upper()} - {p2_char['name']}**: {p2_char['hp']}/{p2_char['max_hp']}\n"
         f"`{get_bar(p2_char['hp'], p2_char['max_hp'])}`\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"⚡️ **{attacker['name'].upper()}'S MOVES** ⚡️\n"
-        f"1️⃣ {move1}\n"
-        f"2️⃣ {move2}\n"
+        f"⚡️ **{attacker['name'].upper()}'S TURN** ⚡️\n"
+        f"👊 **BASIC**: {basic_move}\n"
     )
+    
     if spec_move:
         status += f"⚔️ **SPECIAL**: {spec_move}\n"
 
     status += (
         f"🌟 **ULTIMATE**: {ult_name}\n"
         f"└─ *{ult_desc}*\n"
-        f"━━━━━━━━━━━━━━━━━━\n{log if log else 'Battle Started!'}\n"
+        f"━━━━━━━━━━━━━━━━━━\n{log if log else 'Waiting for your move...'}\n"
         f"━━━━━━━━━━━━━━━━━━\n⌛️ TURN: **{b[b['turn_owner'] + '_name']}**"
     )
 
+    # Simplified Keyboard: One row for Basic, one for Special (if exists), one for Ult
     kb = [
-        [InlineKeyboardButton(f"👊 {move1}", callback_data=f"bmove|{battle_id}|{move1}"), InlineKeyboardButton(f"👊 {move2}", callback_data=f"bmove|{battle_id}|{move2}")],
+        [InlineKeyboardButton(f"👊 {basic_move}", callback_data=f"bmove|{battle_id}|{basic_move}")]
     ]
+    
     if spec_move:
         kb.append([InlineKeyboardButton(f"⚔️ {spec_move}", callback_data=f"bmove|{battle_id}|{spec_move}")])
 
-    kb.append([InlineKeyboardButton(f"🌟 ULTIMATE: {ult_name} 🌟" if not attacker.get('ult_used') else "🚫 ULTIMATE DEPLETED", callback_data=f"bmove|{battle_id}|{ult_name}" if not attacker.get('ult_used') else "none")])
-    kb.append([InlineKeyboardButton("🏃 Run", callback_data=f"brun_{battle_id}"), InlineKeyboardButton("🏳 Forfeit", callback_data=f"bforfeit_{battle_id}")])
+    kb.append([InlineKeyboardButton(f"🌟 ULTIMATE: {ult_name} 🌟" if not attacker.get('ult_used') else "🚫 ULTIMATE DEPLETED", 
+                                  callback_data=f"bmove|{battle_id}|{ult_name}" if not attacker.get('ult_used') else "none")])
+    
+    kb.append([InlineKeyboardButton("🏃 Run", callback_data=f"brun_{battle_id}"), 
+               InlineKeyboardButton("🏳 Forfeit", callback_data=f"bforfeit_{battle_id}")])
 
     try:
         msg = await query.edit_message_text(status, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
@@ -1219,15 +1570,56 @@ async def show_move_selection(query, battle_id, log="", context=None):
 
 async def main_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    data = query.data
     uid = str(query.from_user.id)
+    data = query.data  # Define this FIRST so it can be used in checks
     
-    # Check Registration for interaction
-    if not load_player(uid) and not data.startswith("choose_") and not data.startswith("start_"):
-        await query.answer("⚠️ You must start your journey first! Use /start.", show_alert=True)
+    # 1. Load Player & Check Registration
+    p = load_player(uid)
+    if not p and not data.startswith("choose_") and not data.startswith("v:"):
+        await query.answer("⚠️ Start your journey first! Use /start.", show_alert=True)
         return
 
-    p = get_player(uid)
+    # 2. Universal Spam Protection (2s as you set)
+    spamming, wait_time = await is_spamming(uid, 2)
+    if spamming:
+        await query.answer(f"⏳ Slow down! Wait {wait_time}s...", show_alert=False)
+        return
+    if p: p['last_interaction'] = time.time()
+    # 3. Global Security Lock
+    # Stop locked users from doing anything EXCEPT the verification check
+    if p and p.get('is_locked') and not data.startswith("v:"):
+        await query.answer("🚫 Account Locked! Contact Admin.", show_alert=True)
+        return
+
+    # 4. Marine Security Verification Logic
+    if data.startswith("v:"):
+        _, is_correct, target_uid = data.split(":")
+        
+        if uid != target_uid:
+            await query.answer("❌ This check isn't for you!", show_alert=True)
+            return
+
+        if not p or not p.get('verification_active'): 
+            await query.answer("⌛ This check has expired.")
+            await query.message.delete()
+            return
+
+        if is_correct == "1":
+            p['verification_active'] = False
+            save_player(uid, p)
+            await query.edit_message_text("✅ **Verification Passed!**\nContinue your journey.")
+        else:
+            p['is_locked'] = True
+            p['verification_active'] = False
+            save_player(uid, p)
+            await query.edit_message_text("🚫 **ACCOUNT LOCKED.**\nContact owner to prove your identity.")
+            
+            await context.bot.send_message(
+                chat_id="-1003855697962",
+                text=f"🚨 **BOT ALERT**\n👤: `{p.get('name')}`\n🆔: `{uid}`\n❌: Failed Emoji\n👉 `/unlock {uid}`",
+                parse_mode="Markdown"
+            )
+        return
 
     if data == "none":
         await query.answer("Ultimate can only be used once!")
@@ -1424,6 +1816,13 @@ async def wheel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not load_player(update.effective_user.id):
         await update.message.reply_text("⚠️ You must start your journey first! Use /start.")
         return
+    uid = str(update.effective_user.id)
+    p = load_player(uid)
+    if p and p.get('is_locked'):
+    # This works for both messages and button clicks!
+        await update.effective_message.reply_text("❌ Your account is locked. Contact admin.")
+        return
+
 
     desc = "🎡 **PIRATE WHEELS** 🎡\n\nChoose the wheel you want to spin!"
     kb = [[InlineKeyboardButton("Character Wheel 👤", callback_data="char_wheel")], [InlineKeyboardButton("Resource Wheel 💎", callback_data="res_wheel")]]
@@ -1449,10 +1848,11 @@ async def handle_wheel(query, p, count, wheel_type):
         cost = 100 if count == 1 else 400
 
     if p.get("clovers", 0) < cost:
-        await query.answer("Not enough 🍀 Clovers!", show_alert=True); return
+        await query.answer("Not enough 🍀 Clovers!", show_alert=True)
+        return
 
     p["clovers"] -= cost
-    save_player(uid, p)
+    save_player(uid, p) # Instant RAM update
 
     results = []
     special_anim = None
@@ -1471,29 +1871,43 @@ async def handle_wheel(query, p, count, wheel_type):
                 res = random.choice(others)
 
             char_data = CHARACTERS[res]
-            rarity_prefix = "🟦 " if "Rare" in char_data['rarity'] else "⬜️ " if "Common" in char_data['rarity'] else "🟨 "
+            # Use symbol only from your RARITY_STYLES
+            rarity = char_data.get('rarity', 'Common')
+            symbol = RARITY_STYLES.get(rarity, {}).get("symbol", "🔘")
 
             existing = next((c for c in p["characters"] if c["name"] == res), None)
             if existing:
                 existing["level"] = existing.get("level", 1) + 1
-                results.append(f"{rarity_prefix}{res} (Lv.{existing['level']})")
+                results.append(f"• {res} {symbol} (Lv.{existing['level']})")
             else:
                 p["characters"].append(generate_char_instance(res))
-                results.append(f"{rarity_prefix}{res} (New!)")
+                results.append(f"• {res} {symbol} (New!)")
     else:
         for _ in range(count):
             roll = random.random()
             if roll < 0.05:
                 fruit_name = random.choice(list(DEVIL_FRUITS.keys()))
-                p.setdefault("fruits", []).append(fruit_name); results.append(f"🍎 {fruit_name} (NEW!)")
-            elif roll < 0.15: clovers = random.randint(10, 50); p['clovers'] += clovers; results.append(f"🍀 {clovers} Clovers")
-            else: berries = random.randint(5000, 15000); p['berries'] += berries; results.append(f"🍇 {berries} Berries")
+                p.setdefault("fruits", []).append(fruit_name)
+                results.append(f"🍎 {fruit_name} (NEW!)")
+            elif roll < 0.15:
+                clovers = random.randint(10, 50)
+                p['clovers'] += clovers
+                results.append(f"🍀 {clovers} Clovers")
+            else:
+                berries = random.randint(5000, 15000)
+                p['berries'] += berries
+                results.append(f"🍇 {berries} Berries")
 
-    save_player(uid, p)
+    save_player(uid, p) # Background cloud save
     res_text = f"🎰 **{wheel_type.upper()} RESULTS**:\n\n" + "\n".join(results)
 
     final_anim = special_anim if special_anim else SUMMON_ANIMATION
-    await query.edit_message_media(InputMediaVideo(final_anim, caption=res_text), reply_markup=None)
+    try:
+        await query.edit_message_media(InputMediaVideo(final_anim, caption=res_text, parse_mode="Markdown"), reply_markup=None)
+    except Exception:
+        # Fallback for images or if video fails
+        await query.message.reply_text(res_text, parse_mode="Markdown")
+
 
 # =====================
 # INSPECT & FRUIT
@@ -1503,7 +1917,8 @@ async def inspect_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Usage: `/inspect [Name]`")
         return
-
+    uid = str(update.effective_user.id)
+    p = load_player(uid)
     # Check Registration
     if not load_player(update.effective_user.id):
         await update.message.reply_text("⚠️ You must start your journey first! Use /start.")
@@ -1511,6 +1926,11 @@ async def inspect_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     name = " ".join(context.args).title()
     p = get_player(update.effective_user.id)
+
+    if p and p.get('is_locked'):
+    # This works for both messages and button clicks!
+        await update.effective_message.reply_text("❌ Your account is locked. Contact admin.")
+        return
 
     if name in WEAPONS:
         w = WEAPONS[name]
@@ -1550,6 +1970,14 @@ async def myprofile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not load_player(update.effective_user.id):
         await update.message.reply_text("⚠️ You must start your journey first! Use /start.")
         return
+    uid = str(update.effective_user.id)
+    p = load_player(uid)
+    
+    if p and p.get('is_locked'):
+    # This works for both messages and button clicks!
+        await update.effective_message.reply_text("❌ Your account is locked. Contact admin.")
+        return
+
 
     user_id = update.effective_user.id; p = get_player(user_id, update.effective_user.first_name)
     lvl = p.get('level', 1); exp = p.get('exp', 0); req = get_required_player_exp(lvl)
@@ -1589,6 +2017,13 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not load_player(update.effective_user.id):
         await update.message.reply_text("⚠️ You must start your journey first! Use /start.")
         return
+    uid = str(update.effective_user.id)
+    p = load_player(uid)
+    if p and p.get('is_locked'):
+    # This works for both messages and button clicks!
+        await update.effective_message.reply_text("❌ Your account is locked. Contact admin.")
+        return
+
 
     p = get_player(update.effective_user.id)
     if not context.args: return
@@ -1600,24 +2035,41 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_photo(IMAGE_URLS.get(name, IMAGE_URLS["Default"]), caption=get_stats_text(char_obj, p.get('equipped_fruit')))
 
 async def mycollection(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Check Registration
-    if not load_player(update.effective_user.id):
+    user_id = update.effective_user.id
+    
+    # Instant RAM Lookup
+    p = get_player(user_id)
+    if not p:
         await update.message.reply_text("⚠️ You must start your journey first! Use /start.")
         return
 
-    p = get_player(update.effective_user.id)
+    if p and p.get('is_locked'):
+    # This works for both messages and button clicks!
+        await update.effective_message.reply_text("❌ Your account is locked. Contact admin.")
+        return
+
+
     txt = "📜 **YOUR PIRATE FLEET** 📜\n━━━━━━━━━━━━━━━━━━━\n\n"
+    
     if not p.get('characters'):
         txt += "_No pirates recruited yet._"
     else:
         for c in p['characters']:
-            char_data = CHARACTERS.get(c['name'], {})
-            rarity = char_data.get('rarity', '⬜️')
+            name = c['name']
+            lvl = c.get('level', 1)
+            
+            # Get rarity from master data and map to symbol
+            char_master = CHARACTERS.get(name, {})
+            rarity_type = char_master.get('rarity', 'Common')
+            symbol = RARITY_STYLES.get(rarity_type, {}).get("symbol", "🔘")
+            
             wep = f" | ⚔️ {c['equipped_weapon']}" if c.get('equipped_weapon') else ""
-            txt += f"{rarity} **{c['name']}** (Lv.{c.get('level', 1)}){wep}\n"
+            
+            # Format: Name Symbol (Lv.X)
+            txt += f"• **{name}** {symbol} (Lv.{lvl}){wep}\n"
 
-    txt += "\n━━━━━━━━━━━━━━━━━━━\n_View fruits and weapons in your /inventory_"
     await update.message.reply_text(txt, parse_mode="Markdown")
+
 
 async def sendberry_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Check Registration
@@ -1647,58 +2099,179 @@ async def sendclovers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_player(sender_id, sender); save_player(receiver_id, receiver); await update.message.reply_text(f"✅ Sent 🍀{amount:,} to {receiver['name']}")
     except: pass
 
+async def open_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Only work in Private Chat (DM)
+    if update.effective_chat.type != constants.ChatType.PRIVATE:
+        return # Ignore if in a group
+
+    user_id = update.effective_user.id
+    if not get_player(user_id):
+        await update.message.reply_text("⚠️ Start your journey first with /start.")
+        return
+
+    keyboard = [['Explore 🧭'], ['Close ❌']]
+    markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+    await update.message.reply_text(
+        "🎮 **MENU OPENED** (DM Only)",
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+
+async def close_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Only work in Private Chat (DM)
+    if update.effective_chat.type != constants.ChatType.PRIVATE:
+        return
+
+    await update.message.reply_text(
+        "🔒 **MENU CLOSED**",
+        reply_markup=ReplyKeyboardRemove()
+    )
+
+async def handle_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Only process button text in Private Chat (DM)
+    if update.effective_chat.type != constants.ChatType.PRIVATE:
+        return
+
+    text = update.message.text
+    
+    if text == "Explore 🧭":
+        # Call your existing explore_cmd function directly
+        return await explore_cmd(update, context)
+        
+    elif text == "Close ❌":
+        return await close_cmd(update, context)
+
+async def unstuck_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
+    p = load_player(uid)
+    
+    if not p:
+        return
+
+    # 1. Security Check
+    if p.get('is_locked'):
+        await update.message.reply_text("❌ You are currently locked by Marine Security. Contact Admin.")
+        return
+
+    # 2. State Reset
+    p['last_interaction'] = 0 
+    p['verification_active'] = False
+    
+    # 3. THE FIX: Clear the exploration/battle lock
+    if uid in pending_explores:
+        del pending_explores[uid]
+    
+    # Optional: Clear active battle session if it exists
+    for bid in list(battles.keys()):
+        if uid in bid:
+            del battles[bid]
+    
+    # Save changes
+    save_player(uid, p)
+    
+    await update.message.reply_text("🛠 **System Reset!** Your session and battle timers have been unstuck.")
+    
+    # Admin Log
+    await context.bot.send_message(
+        chat_id="-1003855697962",
+        text=f"🛠 **UNSTUCK:** User `{p.get('name', 'Unknown')}` (`{uid}`) reset their state.",
+        parse_mode="Markdown"
+    )
+
+
+async def auto_detector_job(context: ContextTypes.DEFAULT_TYPE):
+    current_time = time.time()
+    
+    # Iterate through a copy of items to avoid runtime errors if dict changes
+    for uid, p in list(player_cache.items()):
+        last_act = p.get('last_interaction', 0)
+        
+        # Check: Active in last 5 mins (300s) AND not already locked/verifying
+        if (current_time - last_act < 300) and not p.get('is_locked') and not p.get('verification_active'):
+            try:
+                await trigger_security_check(uid, context)
+                # Small sleep to prevent hitting Telegram Flood Limits
+                await asyncio.sleep(0.1) 
+            except Exception as e:
+                logging.error(f"Security check failed for {uid}: {e}")
+
 async def get_file_ids(update: Update, context: ContextTypes.DEFAULT_TYPE):
     fid = update.message.photo[-1].file_id if update.message.photo else (update.message.video.file_id if update.message.video else None)
     if fid: await update.message.reply_text(f"File ID: `{fid}`", parse_mode="Markdown")
 
 async def post_init(application):
     await application.bot.set_my_commands([
-        BotCommand("start", "Start"), BotCommand("wheel", "Spin"), BotCommand("explore", "Explore"),
-        BotCommand("myteam", "Team"), BotCommand("battle", "Fight"), BotCommand("stats", "Stats"),
-        BotCommand("mycollection", "Crew"), BotCommand("inventory", "Treasury"),
-        BotCommand("myprofile", "Profile"), BotCommand("sendberry", "Send Berries"),
-        BotCommand("sendclovers", "Send Clovers"), BotCommand("inspect", "Fruit/Weapon Info"),
-        BotCommand("store", "Open Store"), BotCommand("buy", "Buy Items"), BotCommand("use", "Use Items"),
+        BotCommand("start", "Start Journey"), 
+        BotCommand("wheel", "Spin Wheel"), 
+        BotCommand("explore", "Explore Grand Line"),
+        BotCommand("myteam", "Manage Team"), 
+        BotCommand("battle", "Challenge Player"), 
+        BotCommand("stats", "Character Stats"),
+        BotCommand("open", "Open Menu"), 
+        BotCommand("close", "Close Menu"),
+        BotCommand("mycollection", "View Crew"), 
+        BotCommand("inventory", "Treasury"),
+        BotCommand("myprofile", "Player Profile"), 
+        BotCommand("unlock", "Unlock Player"),
+        BotCommand("unstuck", "Reset Stuck Session"), # FIXED: Corrected spelling
+        BotCommand("sendberry", "Gift Berries"), 
+        BotCommand("sendclovers", "Gift Clovers"), 
+        BotCommand("inspect", "Fruit/Weapon Info"),
+        BotCommand("store", "Open Store"), 
+        BotCommand("buy", "Buy Items"), 
+        BotCommand("use", "Use Items"),
         BotCommand("referral", "Invite Friends")
     ])
 
 # =====================
-# BOT SETUP
+# BOT EXECUTION
 # =====================
-
-# Load token from environment variable.
 TOKEN = os.getenv("BOT_TOKEN")
 
 if __name__ == "__main__":
+
     if not TOKEN:
-        print("❌ Error: BOT_TOKEN is missing! Please set it in your .env file.")
+        print("❌ Error: BOT_TOKEN is missing!")
         exit(1)
     if not MONGO_URI:
-        print("❌ Error: MONGO_URI is missing! Please set it in your .env file.")
+        print("❌ Error: MONGO_URI is missing!")
         exit(1)
 
+    # Building the application with JobQueue enabled
     application = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
 
-    application.add_handlers([
-        CommandHandler("start", start),
-        CommandHandler("wheel", wheel_cmd),
-        CommandHandler("explore", explore_cmd),
-        CommandHandler("stats", stats_cmd),
-        CommandHandler("inspect", inspect_cmd),
-        CommandHandler("mycollection", mycollection),
-        CommandHandler("inventory", inventory_cmd),
-        CommandHandler("myprofile", myprofile_cmd),
-        CommandHandler("sendberry", sendberry_cmd),
-        CommandHandler("sendclovers", sendclovers_cmd),
-        CommandHandler("myteam", myteam),
-        CommandHandler("battle", battle_request),
-        CommandHandler("store", store_cmd),
-        CommandHandler("buy", buy_cmd),
-        CommandHandler("use", use_cmd),
-        CommandHandler("referral", referral_cmd),
-        MessageHandler(filters.PHOTO | filters.VIDEO, get_file_ids),
-        CallbackQueryHandler(main_callback)
-    ])
+    # Registering Handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("open", open_cmd))
+    application.add_handler(CommandHandler("close", close_cmd))
+    application.add_handler(CommandHandler("wheel", wheel_cmd))
+    application.add_handler(CommandHandler("explore", explore_cmd))
+    application.add_handler(CommandHandler("stats", stats_cmd))
+    application.add_handler(CommandHandler("unstuck", unstuck_cmd)) # FIXED: Function name
+    application.add_handler(CommandHandler("unlock", unlock_cmd))   # ADDED: Admin Unlock
+    application.add_handler(CommandHandler("inspect", inspect_cmd))
+    application.add_handler(CommandHandler("mycollection", mycollection))
+    application.add_handler(CommandHandler("inventory", inventory_cmd))
+    application.add_handler(CommandHandler("myprofile", myprofile_cmd))
+    application.add_handler(CommandHandler("sendberry", sendberry_cmd))
+    application.add_handler(CommandHandler("sendclovers", sendclovers_cmd))
+    application.add_handler(CommandHandler("myteam", myteam))
+    application.add_handler(CommandHandler("battle", battle_request))
+    application.add_handler(CommandHandler("store", store_cmd))
+    application.add_handler(CommandHandler("buy", buy_cmd))
+    application.add_handler(CommandHandler("use", use_cmd))
+    application.add_handler(CommandHandler("referral", referral_cmd))
+    
+    # Generic Message Handlers
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu_click))
+    application.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, get_file_ids))
+    application.add_handler(CallbackQueryHandler(main_callback))
 
-    print("🏴‍☠️ Pirate Bot is sailing!...")
+    # START SECURITY SCHEDULER (Every 15 Minutes)
+    job_queue = application.job_queue
+    job_queue.run_repeating(auto_detector_job, interval=900, first=10)
+
+    print("🏴‍☠️ Pirate Bot is sailing with Marine Security Active!...")
     application.run_polling()
+

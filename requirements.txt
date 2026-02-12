@@ -12,3 +12,5 @@ python-telegram-bot[job-queue]
 
 # For managing secret API tokens safely
 python-dotenv==1.0.1
+
+pymongo 
