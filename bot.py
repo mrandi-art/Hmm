@@ -425,12 +425,14 @@ def check_player_levelup(p):
     req = get_required_player_exp(lvl)
     levels_gained = 0
 
+    # Ensure we don't exceed level 100
     while exp >= req and lvl < 100:
         exp -= req
         lvl += 1
         levels_gained += 1
         req = get_required_player_exp(lvl)
-        # Apply rewards per level up
+        
+        # Apply your specific rewards per level gained
         p['clovers'] = p.get('clovers', 0) + 10
         p['berries'] = p.get('berries', 0) + 500
         p['bounty'] = p.get('bounty', 0) + 40
@@ -438,6 +440,7 @@ def check_player_levelup(p):
     p['level'] = lvl
     p['exp'] = exp
     return levels_gained
+
 
 def check_char_levelup(char):
     lvl = char.get('level', 1)
