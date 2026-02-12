@@ -44,17 +44,24 @@ logging.basicConfig(
 
 MONGO_URI = os.getenv("MONGO_URI")
 
-# Initialize Client
+# Initialize Client with Speed Optimizations
 try:
     if MONGO_URI:
-        mongo_client = MongoClient(MONGO_URI)
+        # maxPoolSize allows multiple database tasks at once
+        # retryWrites handles brief mobile signal drops automatically
+        mongo_client = MongoClient(
+            MONGO_URI, 
+            serverSelectionTimeoutMS=5000, 
+            maxPoolSize=50, 
+            retryWrites=True
+        )
         # Verify connection immediately
         mongo_client.admin.command('ping')
         db = mongo_client["pirate_v3"]
         players_collection = db["players"]
         print("✅ Connected to MongoDB Atlas successfully.")
     else:
-        print("⚠️ MONGO_URI not found in environment. Database connection will fail.")
+        print("⚠️ MONGO_URI not found in environment.")
         mongo_client = None
         players_collection = None
 except Exception as e:
@@ -65,19 +72,14 @@ except Exception as e:
 def init_db():
     if mongo_client:
         try:
-            # Verify connection
-            mongo_client.admin.command('ping')
-            
-            # Select the database and collection
             db = mongo_client["pirate_v3"]
-            
             # Create a UNIQUE INDEX on user_id
-            # This makes player lookups nearly instant
+            # This is the BIGGEST speed boost: it prevents the bot from 
+            # scanning the whole DB every time a command is used.
             db["players"].create_index("user_id", unique=True)
-            print("✅ Database indexed and ready.")
-            
+            print("✅ Database index created/verified.")
         except Exception as e:
-            print(f"❌ Database initialization error: {e}")
+            print(f"Database connection warning: {e}")
 
 def save_player(user_id, player_data):
     if players_collection is None: return
