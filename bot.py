@@ -621,8 +621,8 @@ async def unlock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🔄 **Unlocking ALL players...** (This may take a moment)")
         
         try:
-            # 1. Update Database (Catches offline players)
-            result = collection.update_many(
+            # 🟢 FIXED: Used 'users_collection' instead of 'collection'
+            result = users_collection.update_many(
                 {"is_locked": True},
                 {"$set": {"is_locked": False, "verification_active": False, "last_interaction": 0}}
             )
@@ -646,10 +646,13 @@ async def unlock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(msg)
             
             # Log to Admin Group
-            await context.bot.send_message(
-                chat_id="-1003855697962", 
-                text=f"🚨 **GLOBAL UNLOCK** initiated by {update.effective_user.first_name}!"
-            )
+            try:
+                await context.bot.send_message(
+                    chat_id="-1003855697962", 
+                    text=f"🚨 **GLOBAL UNLOCK** initiated by {update.effective_user.first_name}!"
+                )
+            except:
+                pass # Log failed, but action succeeded
             
         except Exception as e:
             await update.message.reply_text(f"❌ Database Error: {e}")
@@ -685,7 +688,6 @@ async def unlock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             results.append(f"❌ `{target_id}`: Error")
 
-    # Final Report for individual IDs
     if results:
         await update.message.reply_text("\n".join(results), parse_mode="Markdown")
 
