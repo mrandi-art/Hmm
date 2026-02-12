@@ -31,6 +31,11 @@ from telegram.ext import (
 )
 # Global dictionary to keep player data in RAM
 player_cache = {}
+RARITY_STYLES = {
+    "Common": {"symbol": "🔘", "label": "🔘 Common"},
+    "Rare": {"symbol": "🔮", "label": "🔮 Rare"},
+    "Legendary": {"symbol": "⚜️", "label": "⚜️ Legendary"}
+}
 
 # =====================
 # LOGGING SETUP
