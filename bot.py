@@ -30,6 +30,7 @@ from telegram.ext import (
 )
 # Global dictionary to keep player data in RAM
 player_cache = {}
+BUTTON_COOLDOWNS = {}
 RARITY_STYLES = {
     "Common": {"symbol": "🔘", "label": "🔘 Common"},
     "Rare": {"symbol": "🔮", "label": "🔮 Rare"},
@@ -483,6 +484,15 @@ def get_scaled_stats(char_obj, player_fruit=None):
 # =====================
 # CORE UTILS
 # =====================
+async def is_spamming(user_id, cooldown_seconds=3):
+    current_time = time.time()
+    last_time = BUTTON_COOLDOWNS.get(user_id, 0)
+    
+    if current_time - last_time < cooldown_seconds:
+        return True, int(cooldown_seconds - (current_time - last_time))
+    
+    BUTTON_COOLDOWNS[user_id] = current_time
+    return False, 0
 
 def get_player(user_id, username=None):
     uid = str(user_id)
@@ -1274,14 +1284,18 @@ async def show_move_selection(query, battle_id, log="", context=None):
 
 async def main_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    data = query.data
     uid = str(query.from_user.id)
     
+    spamming, wait_time = await is_spamming(user_id, 3)
+    if spamming:
+        await query.answer(f"⏳ Slow down! Wait {wait_time}s...", show_alert=False)
+        return
     # Check Registration for interaction
     if not load_player(uid) and not data.startswith("choose_") and not data.startswith("start_"):
         await query.answer("⚠️ You must start your journey first! Use /start.", show_alert=True)
         return
-
+    
+    data = query.data
     p = get_player(uid)
 
     if data == "none":
