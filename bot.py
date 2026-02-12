@@ -17,10 +17,9 @@ import dns.resolver
 dns.resolver.default_resolver = dns.resolver.Resolver(configure=False)
 dns.resolver.default_resolver.nameservers = ['8.8.8.8', '8.8.4.4']
 
-
 from pymongo import MongoClient
 from telegram.request import HTTPXRequest
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, InputMediaPhoto, InputMediaVideo
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, InputMediaPhoto, InputMediaVideo, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -1729,6 +1728,42 @@ async def sendclovers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_player(sender_id, sender); save_player(receiver_id, receiver); await update.message.reply_text(f"✅ Sent 🍀{amount:,} to {receiver['name']}")
     except: pass
 
+async def open_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    # Check registration first using RAM cache
+    if not get_player(user_id):
+        await update.message.reply_text("⚠️ You must start your journey first! Use /start.")
+        return
+
+    # Create the persistent menu
+    # resize_keyboard=True makes the buttons fit mobile screens better
+    keyboard = [['Explore 🧭'], ['Close ❌']]
+    markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+    await update.message.reply_text(
+        "🧭 **NAVIGATION OPENED**\n\nChoose an option from the menu below:",
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+
+async def close_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # ReplyKeyboardRemove completely hides the custom menu
+    await update.message.reply_text(
+        "❌ **NAVIGATION CLOSED**",
+        reply_markup=ReplyKeyboardRemove()
+    )
+
+async def handle_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    
+    if text == "Explore 🧭":
+        # Redirect to your existing explore command
+        await explore_command(update, context)
+        
+    elif text == "Close ❌":
+        # Redirect to the close logic
+        await close_cmd(update, context)
+
 async def get_file_ids(update: Update, context: ContextTypes.DEFAULT_TYPE):
     fid = update.message.photo[-1].file_id if update.message.photo else (update.message.video.file_id if update.message.video else None)
     if fid: await update.message.reply_text(f"File ID: `{fid}`", parse_mode="Markdown")
@@ -1737,12 +1772,14 @@ async def post_init(application):
     await application.bot.set_my_commands([
         BotCommand("start", "Start"), BotCommand("wheel", "Spin"), BotCommand("explore", "Explore"),
         BotCommand("myteam", "Team"), BotCommand("battle", "Fight"), BotCommand("stats", "Stats"),
+        BotCommand("open", "Open Menu"), BotCommand("close", "Close Menu"),
         BotCommand("mycollection", "Crew"), BotCommand("inventory", "Treasury"),
         BotCommand("myprofile", "Profile"), BotCommand("sendberry", "Send Berries"),
         BotCommand("sendclovers", "Send Clovers"), BotCommand("inspect", "Fruit/Weapon Info"),
         BotCommand("store", "Open Store"), BotCommand("buy", "Buy Items"), BotCommand("use", "Use Items"),
         BotCommand("referral", "Invite Friends")
     ])
+
 
 # =====================
 # BOT SETUP
@@ -1763,6 +1800,8 @@ if __name__ == "__main__":
 
     application.add_handlers([
         CommandHandler("start", start),
+        CommandHandler("open", open_cmd),
+        CommandHandler("close", close_cmd),
         CommandHandler("wheel", wheel_cmd),
         CommandHandler("explore", explore_cmd),
         CommandHandler("stats", stats_cmd),
@@ -1779,6 +1818,7 @@ if __name__ == "__main__":
         CommandHandler("use", use_cmd),
         CommandHandler("referral", referral_cmd),
         MessageHandler(filters.PHOTO | filters.VIDEO, get_file_ids),
+        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu_click),
         CallbackQueryHandler(main_callback)
     ])
 
