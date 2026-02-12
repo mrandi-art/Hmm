@@ -29,6 +29,8 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+# Global dictionary to keep player data in RAM
+player_cache = {}
 
 # =====================
 # LOGGING SETUP
@@ -81,33 +83,38 @@ def init_db():
         except Exception as e:
             print(f"Database connection warning: {e}")
 
+def load_player(user_id):
+    uid = str(user_id)
+    # Check RAM first (Instant)
+    if uid in player_cache:
+        return player_cache[uid]
+        
+    if players_collection is None: return None
+    try:
+        # If not in RAM, get from DB (Slow)
+        data = players_collection.find_one({"user_id": uid}, {"_id": 0})
+        if data:
+            player_cache[uid] = data # Store in RAM for ultra-fast access
+        return data
+    except Exception as e:
+        logging.error(f"Error loading player {user_id}: {e}")
+        return None
+
 def save_player(user_id, player_data):
+    uid = str(user_id)
+    # Update RAM first (Instant)
+    player_cache[uid] = player_data
+    
     if players_collection is None: return
     try:
-        player_data['user_id'] = str(user_id)
-        # Remove _id if present to avoid immutable field error on update
-        if '_id' in player_data:
-            del player_data['_id']
+        # Update DB in the background
         players_collection.update_one(
-            {"user_id": str(user_id)},
+            {"user_id": uid},
             {"$set": player_data},
             upsert=True
         )
     except Exception as e:
-        print(f"Error saving player {user_id}: {e}")
-
-def load_player(user_id):
-    if players_collection is None: 
-        return None
-    try:
-        # Use projection {'_id': 0} to exclude the ID at the database level
-        # This is faster than deleting it in Python after fetching
-        data = players_collection.find_one({"user_id": str(user_id)}, {"_id": 0})
-        return data
-    except Exception as e:
-        # Log the specific error to help with Termux debugging
-        logging.error(f"Error loading player {user_id}: {e}")
-        return None
+        logging.error(f"Error saving player {user_id}: {e}")
 
 
 init_db()
@@ -472,8 +479,12 @@ def get_scaled_stats(char_obj, player_fruit=None):
 
 def get_player(user_id, username=None):
     uid = str(user_id)
+    
+    # 1. load_player now checks RAM first, making this instant
     p = load_player(uid)
+    
     if not p:
+        # Create new player template
         p = {
             "user_id": uid, "name": username or "Pirate", "team": [], "characters": [],
             "berries": 10000, "clovers": 0, "bounty": 0, "exp": 0, "level": 1,
@@ -482,7 +493,10 @@ def get_player(user_id, username=None):
             "explore_count": 0, "start_date": datetime.now().strftime("%Y-%m-%d"),
             "referred_by": None, "referrals": 0
         }
+        # Only save to DB for brand new registrations
+        save_player(uid, p)
     else:
+        # 2. Fill in missing keys (Migration logic) without hitting the DB
         defaults = {
             "user_id": uid, "team": [], "characters": [], "berries": 0, "clovers": 0, "bounty": 0,
             "exp": 0, "level": 1, "wins": 0, "losses": 0, "explore_wins": 0, "kill_count": 0,
@@ -490,17 +504,29 @@ def get_player(user_id, username=None):
             "explore_count": 0, "start_date": datetime.now().strftime("%Y-%m-%d"),
             "referred_by": None, "referrals": 0
         }
+        modified = False
         for k, v in defaults.items():
-            if k not in p: p[k] = v
+            if k not in p: 
+                p[k] = v
+                modified = True
+        
         if not p.get("name") or p["name"] == "Pirate":
-            if username: p["name"] = username
+            if username: 
+                p["name"] = username
+                modified = True
+        
+        # 3. Handle Admin Stats in RAM
+        if int(user_id) in ADMIN_IDS:
+            p["berries"] = max(p.get("berries", 0), 99999999)
+            p["clovers"] = max(p.get("clovers", 0), 99999999)
+            p["level"] = 100
+            modified = True
 
-    if int(user_id) in ADMIN_IDS:
-        p["berries"] = max(p.get("berries", 0), 99999999)
-        p["clovers"] = max(p.get("clovers", 0), 99999999)
-        p["level"] = 100
+        # Only save if we actually added missing default keys
+        if modified:
+            save_player(uid, p)
 
-    save_player(uid, p)
+    # 4. Return the RAM-cached object immediately
     return p
 
 def get_stats_text(char_obj_or_name, player_fruit=None):
