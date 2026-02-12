@@ -1754,15 +1754,15 @@ async def close_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def handle_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # This catches the exact text from the button
     text = update.message.text
     
     if text == "Explore 🧭":
-        # Redirect to your existing explore command
-        await explore_command(update, context)
+        # We manually call the command function
+        return await explore_cmd(update, context)
         
     elif text == "Close ❌":
-        # Redirect to the close logic
-        await close_cmd(update, context)
+        return await close_cmd(update, context)
 
 async def get_file_ids(update: Update, context: ContextTypes.DEFAULT_TYPE):
     fid = update.message.photo[-1].file_id if update.message.photo else (update.message.video.file_id if update.message.video else None)
@@ -1799,6 +1799,7 @@ if __name__ == "__main__":
     application = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
 
     application.add_handlers([
+        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu_click),
         CommandHandler("start", start),
         CommandHandler("open", open_cmd),
         CommandHandler("close", close_cmd),
@@ -1818,7 +1819,6 @@ if __name__ == "__main__":
         CommandHandler("use", use_cmd),
         CommandHandler("referral", referral_cmd),
         MessageHandler(filters.PHOTO | filters.VIDEO, get_file_ids),
-        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu_click),
         CallbackQueryHandler(main_callback)
     ])
 
