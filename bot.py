@@ -544,7 +544,7 @@ async def trigger_security_check(user_id, context):
     text = (
         f"⚠️ *MARINE SECURITY CHECK!*\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"Identify *{riddle['hint']}* within 15 seconds!\n"
+        f"Identify *{riddle['hint']}* within 30 seconds!\n"
         f"━━━━━━━━━━━━━━━━━━━"
     )
     
@@ -559,7 +559,7 @@ async def trigger_security_check(user_id, context):
         # Auto-lock after 15 seconds if still active
         context.job_queue.run_once(
             security_timeout, 
-            15, 
+            30, 
             data={'user_id': user_id, 'msg_id': msg.message_id}
         )
         
@@ -609,15 +609,58 @@ async def unlock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 2. Argument Check
     if not context.args:
-        await update.message.reply_text("⚠️ Usage: `/unlock ID1 ID2 ...`")
+        await update.message.reply_text("⚠️ Usage:\n`/unlock <id>` (Unlock one)\n`/unlock all` (Unlock EVERYONE)")
         return
 
-    # 3. Loop through ALL provided IDs
+    command_arg = context.args[0].lower()
+
+    # ==========================
+    # OPTION A: UNLOCK EVERYONE
+    # ==========================
+    if command_arg == "all":
+        await update.message.reply_text("🔄 **Unlocking ALL players...** (This may take a moment)")
+        
+        try:
+            # 1. Update Database (Catches offline players)
+            result = collection.update_many(
+                {"is_locked": True},
+                {"$set": {"is_locked": False, "verification_active": False, "last_interaction": 0}}
+            )
+            
+            # 2. Update RAM (Catches online players)
+            ram_count = 0
+            for uid in player_cache:
+                if player_cache[uid].get('is_locked'):
+                    player_cache[uid]['is_locked'] = False
+                    player_cache[uid]['verification_active'] = False
+                    player_cache[uid]['last_interaction'] = 0
+                    ram_count += 1
+            
+            # 3. Report
+            msg = (
+                f"✅ **GLOBAL UNLOCK COMPLETE**\n\n"
+                f"📂 Database Updated: {result.modified_count} players\n"
+                f"🧠 RAM Updated: {ram_count} active sessions\n"
+                f"🔓 Everyone is free to sail!"
+            )
+            await update.message.reply_text(msg)
+            
+            # Log to Admin Group
+            await context.bot.send_message(
+                chat_id="-1003855697962", 
+                text=f"🚨 **GLOBAL UNLOCK** initiated by {update.effective_user.first_name}!"
+            )
+            
+        except Exception as e:
+            await update.message.reply_text(f"❌ Database Error: {e}")
+        return
+
+    # ==========================
+    # OPTION B: UNLOCK SPECIFIC IDs
+    # ==========================
     results = []
-    
     for target_id in context.args:
         try:
-            # Clean ID (remove commas if typed like "123, 456")
             clean_id = str(target_id).replace(",", "").strip()
             p = load_player(clean_id)
             
@@ -625,7 +668,7 @@ async def unlock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 results.append(f"⚠️ `{clean_id}`: Not found")
                 continue
 
-            # The Unlock Logic
+            # Unlock logic
             p['is_locked'] = False
             p['verification_active'] = False
             p['last_interaction'] = 0 
@@ -633,18 +676,18 @@ async def unlock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             results.append(f"✅ `{p['name']}`: Unlocked")
             
-            # Try to DM the user
+            # Attempt DM
             try:
-                await context.bot.send_message(chat_id=clean_id, text="🔓 **Account Unlocked!**\nYou may continue sailing.")
+                await context.bot.send_message(chat_id=clean_id, text="🔓 **Account Unlocked!**\nThe Marine Security lock has been lifted.")
             except:
-                pass # Ignore if user blocked bot
+                pass 
 
         except Exception as e:
-            results.append(f"❌ `{target_id}`: Error ({e})")
+            results.append(f"❌ `{target_id}`: Error")
 
-    # 4. Send Summary Report
-    await update.message.reply_text("\n".join(results), parse_mode="Markdown")
-
+    # Final Report for individual IDs
+    if results:
+        await update.message.reply_text("\n".join(results), parse_mode="Markdown")
 
 def get_player(user_id, username=None):
     uid = str(user_id)
