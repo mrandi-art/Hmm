@@ -1729,36 +1729,43 @@ async def sendclovers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except: pass
 
 async def open_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Only work in Private Chat (DM)
+    if update.effective_chat.type != constants.ChatType.PRIVATE:
+        return # Ignore if in a group
+
     user_id = update.effective_user.id
-    # Check registration first using RAM cache
     if not get_player(user_id):
-        await update.message.reply_text("⚠️ You must start your journey first! Use /start.")
+        await update.message.reply_text("⚠️ Start your journey first with /start.")
         return
 
-    # Create the persistent menu
-    # resize_keyboard=True makes the buttons fit mobile screens better
     keyboard = [['Explore 🧭'], ['Close ❌']]
     markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
     await update.message.reply_text(
-        "🧭 **NAVIGATION OPENED**\n\nChoose an option from the menu below:",
+        "🎮 **MENU OPENED** (DM Only)",
         reply_markup=markup,
         parse_mode="Markdown"
     )
 
 async def close_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ReplyKeyboardRemove completely hides the custom menu
+    # Only work in Private Chat (DM)
+    if update.effective_chat.type != constants.ChatType.PRIVATE:
+        return
+
     await update.message.reply_text(
-        "❌ **NAVIGATION CLOSED**",
+        "🔒 **MENU CLOSED**",
         reply_markup=ReplyKeyboardRemove()
     )
 
 async def handle_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # This catches the exact text from the button
+    # Only process button text in Private Chat (DM)
+    if update.effective_chat.type != constants.ChatType.PRIVATE:
+        return
+
     text = update.message.text
     
     if text == "Explore 🧭":
-        # We manually call the command function
+        # Call your existing explore_cmd function directly
         return await explore_cmd(update, context)
         
     elif text == "Close ❌":
