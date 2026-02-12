@@ -11,6 +11,13 @@ from datetime import datetime
 from dotenv import load_dotenv
 load_dotenv()
 
+import dns.resolver
+
+# Fix for Termux/Android missing /etc/resolv.conf
+dns.resolver.default_resolver = dns.resolver.Resolver(configure=False)
+dns.resolver.default_resolver.nameservers = ['8.8.8.8', '8.8.4.4']
+
+
 from pymongo import MongoClient
 from telegram.request import HTTPXRequest
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, InputMediaPhoto, InputMediaVideo
