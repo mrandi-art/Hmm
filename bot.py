@@ -479,21 +479,44 @@ def check_player_levelup(p):
     req = get_required_player_exp(lvl)
     levels_gained = 0
 
-    # Ensure we don't exceed level 100
+    # 1. Standard Leveling Logic
     while exp >= req and lvl < 100:
         exp -= req
         lvl += 1
         levels_gained += 1
         req = get_required_player_exp(lvl)
-        
-        # Apply your specific rewards per level gained
+
         p['clovers'] = p.get('clovers', 0) + 10
         p['berries'] = p.get('berries', 0) + 500
         p['bounty'] = p.get('bounty', 0) + 40
 
     p['level'] = lvl
     p['exp'] = exp
+
+    # 🟢 2. NEW: Referral Milestone Check (Level 10)
+    # This triggers ONLY when the player hits Level 10 for the first time
+    if p.get('level', 1) >= 10 and p.get('referred_by') and not p.get('referral_reward_claimed'):
+        p['referral_reward_claimed'] = True  # Mark as claimed so it never runs again
+        
+        # REVISED REWARDS (Reduced amounts)
+        child_berries, child_clovers = 2500, 25   # Reward for the new player
+        parent_berries, parent_clovers = 5000, 50 # Reward for the recruiter
+        
+        # Pay the new player (current player 'p')
+        p['berries'] += child_berries
+        p['clovers'] += child_clovers
+        
+        # Pay the Recruiter (Parent)
+        parent_id = p.get('referred_by')
+        parent = load_player(parent_id)
+        if parent:
+            parent['berries'] += parent_berries
+            parent['clovers'] += parent_clovers
+            parent['referrals'] = parent.get('referrals', 0) + 1
+            save_player(parent_id, parent)
+            
     return levels_gained
+
 
 
 def check_char_levelup(char):
@@ -979,16 +1002,14 @@ async def show_starter_page(update, name, target_user_id):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     username = update.effective_user.username or update.effective_user.first_name or "Pirate"
-    
+
     # 1. Instant RAM Lookup
     p = load_player(user_id) 
     is_new = False
 
     if p and p.get('is_locked'):
-    # This works for both messages and button clicks!
         await update.effective_message.reply_text("❌ Your account is locked. Contact admin.")
         return
-
 
     if not p:
         is_new = True
@@ -998,37 +1019,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "starter_summoned": False, "wins": 0, "losses": 0, "explore_wins": 0, "kill_count": 0,
             "fruits": [], "equipped_fruit": None, "tokens": 0, "weapons": [],
             "explore_count": 0, "start_date": datetime.now().strftime("%Y-%m-%d"),"is_locked": False,
-            "verification_active": False, "referred_by": None, "referrals": 0
+            "verification_active": False, "referred_by": None, "referrals": 0,
+            "referral_reward_claimed": False  # 🟢 Added to track milestone
         }
 
-    # 2. Optimized Referral Logic
+    # 2. Optimized Referral Tracking (No instant rewards)
     if is_new and context.args:
         try:
             referrer_id = str(context.args[0])
             if referrer_id != user_id:
                 referrer = load_player(referrer_id)
                 if referrer:
+                    # Record the link but don't pay yet
                     p['referred_by'] = referrer_id
-                    p['berries'] += 5000
-                    p['clovers'] += 50
                     
-                    referrer['berries'] += 10000
-                    referrer['clovers'] += 100
-                    referrer['referrals'] = referrer.get('referrals', 0) + 1
-
-                    # Save referrer immediately to RAM
-                    save_player(referrer_id, referrer)
-
-                    await update.message.reply_text(f"🤝 Referred by {referrer['name']}! Bonus: 5,000 🍇 + 50 🍀")
-                    
-                    # UPDATED: Notification including Clovers
-                    try:
-                        await context.bot.send_message(
-                            chat_id=referrer_id, 
-                            text=f"🤝 **{p['name']}** joined!\n🍇 `+10,000` Berries\n🍀 `+100` Clovers",
-                            parse_mode="Markdown"
-                        )
-                    except: pass
+                    await update.message.reply_text(
+                        f"🤝 Recruited by {referrer['name']}!\n"
+                        "Reach **Level 10** to unlock your starting bonus! 🎁"
+                    )
         except Exception as e:
             logging.error(f"Referral logic error: {e}")
 
@@ -1045,29 +1053,27 @@ async def referral_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     bot_username = context.bot.username
     link = f"https://t.me/{bot_username}?start={user_id}"
-    
+
     p = get_player(user_id)
     ref_count = p.get('referrals', 0)
 
     if p and p.get('is_locked'):
-    # This works for both messages and button clicks!
         await update.effective_message.reply_text("❌ Your account is locked. Contact admin.")
         return
-
 
     text = (
         f"╭━━━━━━━━━━━━━━━╮\n"
         f"✦    🤝 REFERRAL 🤝     ✦\n"
         f"╰━━━━━━━━━━━━━━━╯\n\n"
-        f"Share your link to grow your fleet!\n\n"
+        f"Share your link to grow your fleet!\n"
+        f"Rewards are granted when your friend reaches **Level 10**. 🏆\n\n"
         f"🔗 **YOUR LINK:**\n`{link}`\n\n"
-        f"🎁 **REWARDS**\n"
-        f"• You get: 10,000 🍇 + 100 🍀\n"
-        f"• Friend gets: 5,000 🍇 + 50 🍀\n\n"
+        f"🎁 **REVISED REWARDS**\n"
+        f"• You get: 5,000 🍇 + 50 🍀\n"
+        f"• Friend gets: 2,500 🍇 + 25 🍀\n\n"
         f"📊 **TOTAL RECRUITS:** `{ref_count}`"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
-
 
 
 # =====================
@@ -2182,19 +2188,27 @@ async def unstuck_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def auto_detector_job(context: ContextTypes.DEFAULT_TYPE):
     current_time = time.time()
-    
-    # Iterate through a copy of items to avoid runtime errors if dict changes
+
+    # Iterate through a copy of items to avoid runtime errors
     for uid, p in list(player_cache.items()):
         last_act = p.get('last_interaction', 0)
-        
-        # Check: Active in last 5 mins (300s) AND not already locked/verifying
-        if (current_time - last_act < 300) and not p.get('is_locked') and not p.get('verification_active'):
-            try:
-                await trigger_security_check(uid, context)
-                # Small sleep to prevent hitting Telegram Flood Limits
-                await asyncio.sleep(0.1) 
-            except Exception as e:
-                logging.error(f"Security check failed for {uid}: {e}")
+        time_diff = current_time - last_act
+
+        # 1. PRIMARY FILTER: Active in the last 5 minutes (300s)
+        # Also ensure they aren't already locked or currently being verified
+        if (time_diff < 300) and not p.get('is_locked') and not p.get('verification_active'):
+            
+            # 2. SECONDARY FILTER: Active in the last 5 seconds
+            # This targets the "Instant Clickers" specifically at the patrol time
+            if time_diff < 5:
+                try:
+                    # 3. ACTION: Send Captcha
+                    await trigger_security_check(uid, context)
+                    # Small sleep to prevent hitting Telegram Flood Limits
+                    await asyncio.sleep(0.1) 
+                except Exception as e:
+                    logging.error(f"Security check failed for {uid}: {e}")
+
 
 async def get_file_ids(update: Update, context: ContextTypes.DEFAULT_TYPE):
     fid = update.message.photo[-1].file_id if update.message.photo else (update.message.video.file_id if update.message.video else None)
