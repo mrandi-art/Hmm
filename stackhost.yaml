@@ -9,7 +9,7 @@ commands:
   package: ""
   build:
     - "pip install -r requirements.txt"
-  start: "python bot.py"
+  start: "python goat.py"
 
 repository:
   branch: "main"
