@@ -3258,6 +3258,7 @@ def handle_callbacks(call):
         elif data.startswith('restart_'): restart_bot_callback(call)
         elif data.startswith('delete_'): delete_bot_callback(call)
         elif data.startswith('logs_'): logs_bot_callback(call)
+        elif data.startswith('input_'): input_bot_callback(call)
         elif data == 'speed': speed_callback(call)
         elif data == 'back_to_main': back_to_main_callback(call)
         elif data.startswith('confirm_broadcast_'): handle_confirm_broadcast(call)
