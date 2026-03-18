@@ -2147,9 +2147,10 @@ def create_control_buttons(script_owner_id, file_name, is_running=True):
             types.InlineKeyboardButton("🔄 Restart", callback_data=f'restart_{script_owner_id}_{file_name}')
         )
         markup.row(
-            types.InlineKeyboardButton("🗑️ Delete", callback_data=f'delete_{script_owner_id}_{file_name}'),
+            types.InlineKeyboardButton("⌨️ Send Input", callback_data=f'input_{script_owner_id}_{file_name}'),
             types.InlineKeyboardButton("📜 Logs", callback_data=f'logs_{script_owner_id}_{file_name}')
         )
+        markup.row(types.InlineKeyboardButton("🗑️ Delete", callback_data=f'delete_{script_owner_id}_{file_name}'))
     else:
         markup.row(
             types.InlineKeyboardButton("🟢 Start", callback_data=f'start_{script_owner_id}_{file_name}'),
@@ -3725,7 +3726,34 @@ def logs_bot_callback(call):
     except Exception as e:
         logger.error(f"Error in logs_bot_callback for '{call.data}': {e}", exc_info=True)
         bot.answer_callback_query(call.id, "Error fetching logs.", show_alert=True)
+        
+def input_bot_callback(call):
+    try:
+        _, script_owner_id_str, file_name = call.data.split('_', 2)
+        script_owner_id = int(script_owner_id_str)
+        if not (call.from_user.id == script_owner_id or call.from_user.id in admin_ids):
+            bot.answer_callback_query(call.id, "⚠️ Permission denied.", show_alert=True); return
+        if not is_bot_running(script_owner_id, file_name):
+            bot.answer_callback_query(call.id, "⚠️ Script must be running to send input.", show_alert=True); return
+        bot.answer_callback_query(call.id)
+        msg = bot.send_message(call.message.chat.id, f"⌨️ **Terminal Input for `{file_name}`**\nType the text/command to send to the script's terminal.\n\n/cancel to abort.", parse_mode='Markdown')
+        bot.register_next_step_handler(msg, process_script_terminal_input, script_owner_id, file_name)
+    except Exception as e: logger.error(f"Error in input_bot_callback: {e}")
 
+def process_script_terminal_input(message, script_owner_id, file_name):
+    if message.text and message.text.lower() == '/cancel':
+        bot.reply_to(message, "❌ Input cancelled."); return
+    script_key = f"{script_owner_id}_{file_name}"
+    if script_key in bot_scripts:
+        proc = bot_scripts[script_key].get('process')
+        if proc and proc.poll() is None:
+            try:
+                proc.stdin.write(message.text + "\n")
+                proc.stdin.flush()
+                bot.reply_to(message, f"✅ Sent to `{file_name}` terminal:\n`{message.text}`", parse_mode='Markdown')
+            except Exception as e: bot.reply_to(message, f"❌ Failed to send input: {str(e)}")
+        else: bot.reply_to(message, "⚠️ Script is no longer running.")
+    else: bot.reply_to(message, "⚠️ Script session not found in memory.")                      
 def speed_callback(call):
     user_id = call.from_user.id
     chat_id = call.message.chat.id
