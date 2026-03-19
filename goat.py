@@ -2458,7 +2458,7 @@ def run_script(script_path, script_owner_id, user_folder, file_name, message_obj
                  startupinfo = subprocess.STARTUPINFO(); startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
                  startupinfo.wShowWindow = subprocess.SW_HIDE
             process = subprocess.Popen(
-                [sys.executable, script_path], cwd=user_folder, stdout=log_file, stderr=log_file,
+                [sys.executable, '-u', script_path], cwd=user_folder, stdout=log_file, stderr=log_file,
                 stdin=subprocess.PIPE, startupinfo=startupinfo, creationflags=creationflags,
                 encoding='utf-8', errors='ignore'
             )
@@ -3696,7 +3696,10 @@ def logs_bot_callback(call):
         user_folder = get_user_folder(script_owner_id)
         log_path = os.path.join(user_folder, f"{os.path.splitext(file_name)[0]}.log")
         if not os.path.exists(log_path):
-            bot.answer_callback_query(call.id, f"⚠️ No logs for '{file_name}'.", show_alert=True); return
+            # Try to create it if it doesn't exist so the user doesn't get an error
+            open(log_path, 'a').close() 
+        
+        bot.answer_callback_query(call.id)
 
         bot.answer_callback_query(call.id) 
         try:
