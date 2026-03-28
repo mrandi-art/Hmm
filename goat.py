@@ -231,7 +231,6 @@ load_data()
 # --- Security Functions ---
 def check_code_security(file_path, file_type):
     """Check code for dangerous commands (lightweight version)"""
-    return True, "Code is safe (Handled by Docker Sandbox)"
     try:
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
             content = f.read()
@@ -827,7 +826,6 @@ def check_code_security(file_path, file_type):
 
 def scan_zip_security(zip_path):
     """Check ZIP contents for security (lightweight version)"""
-    return True, "Archive is safe (Handled by Docker Sandbox)"
     try:
         dangerous_patterns = [
     # ======================
@@ -1670,28 +1668,67 @@ def is_bot_running(script_owner_id, file_name):
 
 def kill_process_tree(process_info):
     """Kill a process and all its children, ensuring log file is closed."""
+    pid = None
+    log_file_closed = False
     script_key = process_info.get('script_key', 'N/A') 
 
     try:
         if 'log_file' in process_info and hasattr(process_info['log_file'], 'close') and not process_info['log_file'].closed:
             try:
                 process_info['log_file'].close()
-                logger.info(f"Closed log file for {script_key}")
+                log_file_closed = True
+                logger.info(f"Closed log file for {script_key} (PID: {process_info.get('process', {}).get('pid', 'N/A')})")
             except Exception as log_e:
                 logger.error(f"Error closing log file during kill for {script_key}: {log_e}")
 
-        pass # Docker cleanup not needed for direct process
-            
         process = process_info.get('process')
         if process and hasattr(process, 'pid'):
-            try:
-                process.terminate()
-                process.kill()
-            except Exception:
-                pass
-                
+           pid = process.pid
+           if pid: 
+                try:
+                    parent = psutil.Process(pid)
+                    children = parent.children(recursive=True)
+                    logger.info(f"Attempting to kill process tree for {script_key} (PID: {pid}, Children: {[c.pid for c in children]})")
+
+                    for child in children:
+                        try:
+                            child.terminate()
+                            logger.info(f"Terminated child process {child.pid} for {script_key}")
+                        except psutil.NoSuchProcess:
+                            logger.warning(f"Child process {child.pid} for {script_key} already gone.")
+                        except Exception as e:
+                            logger.error(f"Error terminating child {child.pid} for {script_key}: {e}. Trying kill...")
+                            try: child.kill(); logger.info(f"Killed child process {child.pid} for {script_key}")
+                            except Exception as e2: logger.error(f"Failed to kill child {child.pid} for {script_key}: {e2}")
+
+                    gone, alive = psutil.wait_procs(children, timeout=1)
+                    for p in alive:
+                        logger.warning(f"Child process {p.pid} for {script_key} still alive. Killing.")
+                        try: p.kill()
+                        except Exception as e: logger.error(f"Failed to kill child {p.pid} for {script_key} after wait: {e}")
+
+                    try:
+                        parent.terminate()
+                        logger.info(f"Terminated parent process {pid} for {script_key}")
+                        try: parent.wait(timeout=1)
+                        except psutil.TimeoutExpired:
+                            logger.warning(f"Parent process {pid} for {script_key} did not terminate. Killing.")
+                            parent.kill()
+                            logger.info(f"Killed parent process {pid} for {script_key}")
+                    except psutil.NoSuchProcess:
+                        logger.warning(f"Parent process {pid} for {script_key} already gone.")
+                    except Exception as e:
+                        logger.error(f"Error terminating parent {pid} for {script_key}: {e}. Trying kill...")
+                        try: parent.kill(); logger.info(f"Killed parent process {pid} for {script_key}")
+                        except Exception as e2: logger.error(f"Failed to kill parent {pid} for {script_key}: {e2}")
+
+                except psutil.NoSuchProcess:
+                    logger.warning(f"Process {pid or 'N/A'} for {script_key} not found during kill. Already terminated?")
+           else: logger.error(f"Process PID is None for {script_key}.")
+        elif log_file_closed: logger.warning(f"Process object missing for {script_key}, but log file closed.")
+        else: logger.error(f"Process object missing for {script_key}, and no log file. Cannot kill.")
     except Exception as e:
-        logger.error(f"❌ Unexpected error killing process for ({script_key}): {e}", exc_info=True)
+        logger.error(f"❌ Unexpected error killing process tree for PID {pid or 'N/A'} ({script_key}): {e}", exc_info=True)
 
 # --- Map Telegram import names to actual PyPI package names ---
 TELEGRAM_MODULES = {
@@ -1827,14 +1864,8 @@ def attempt_install_pip(module_name, message, manual_request=False):
         else:
             bot.reply_to(message, f"🐍 Module `{module_name}` not found. Installing `{package_name}`...", parse_mode='Markdown')
         
-        user_id = message.from_user.id if hasattr(message, 'from_user') else OWNER_ID
-        user_folder = get_user_folder(user_id)
-        
-        command = [
-            sys.executable, '-m', 'pip', 'install', 
-            package_name, '-t', os.path.join(user_folder, 'modules')
-        ]
-        logger.info(f"Running Docker install: {' '.join(command)}")
+        command = [sys.executable, '-m', 'pip', 'install', package_name]
+        logger.info(f"Running install: {' '.join(command)}")
         result = subprocess.run(command, capture_output=True, text=True, check=False, encoding='utf-8', errors='ignore')
         
         if result.returncode == 0:
@@ -2116,10 +2147,9 @@ def create_control_buttons(script_owner_id, file_name, is_running=True):
             types.InlineKeyboardButton("🔄 Restart", callback_data=f'restart_{script_owner_id}_{file_name}')
         )
         markup.row(
-            types.InlineKeyboardButton("⌨️ Send Input", callback_data=f'input_{script_owner_id}_{file_name}'),
+            types.InlineKeyboardButton("🗑️ Delete", callback_data=f'delete_{script_owner_id}_{file_name}'),
             types.InlineKeyboardButton("📜 Logs", callback_data=f'logs_{script_owner_id}_{file_name}')
         )
-        markup.row(types.InlineKeyboardButton("🗑️ Delete", callback_data=f'delete_{script_owner_id}_{file_name}'))
     else:
         markup.row(
             types.InlineKeyboardButton("🟢 Start", callback_data=f'start_{script_owner_id}_{file_name}'),
@@ -2422,33 +2452,23 @@ def run_script(script_path, script_owner_id, user_folder, file_name, message_obj
              bot.reply_to(message_obj_for_reply, f"❌ Failed to open log file '{log_file_path}': {e}")
              return
         try:
-            safe_name = re.sub(r'[^a-zA-Z0-9_.-]', '_', file_name)
-            container_name = f"sandbox_py_{script_owner_id}_{safe_name}"
-            
-            # Set environment variables so the script finds its installed modules
-            env = os.environ.copy()
-            env["PYTHONPATH"] = os.path.join(user_folder, 'modules')
-
+            startupinfo = None; creationflags = 0
+            if os.name == 'nt':
+                 startupinfo = subprocess.STARTUPINFO(); startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                 startupinfo.wShowWindow = subprocess.SW_HIDE
             process = subprocess.Popen(
-                [sys.executable, '-u', file_name], 
-                cwd=user_folder,
-                stdout=log_file, 
-                stderr=log_file,
-                stdin=subprocess.PIPE, 
-                env=env,
-                encoding='utf-8', 
-                errors='ignore'
+                [sys.executable, script_path], cwd=user_folder, stdout=log_file, stderr=log_file,
+                stdin=subprocess.PIPE, startupinfo=startupinfo, creationflags=creationflags,
+                encoding='utf-8', errors='ignore'
             )
-            
-            logger.info(f"Started Docker Python process {process.pid} (Container: {container_name}) for {script_key}")
+            logger.info(f"Started Python process {process.pid} for {script_key}")
             bot_scripts[script_key] = {
                 'process': process, 'log_file': log_file, 'file_name': file_name,
-                'container_name': container_name,
-                'chat_id': message_obj_for_reply.chat.id,
-                'script_owner_id': script_owner_id,
+                'chat_id': message_obj_for_reply.chat.id, # Chat ID for potential future direct replies from script, defaults to admin/triggering user
+                'script_owner_id': script_owner_id, # Actual owner of the script
                 'start_time': datetime.now(), 'user_folder': user_folder, 'type': 'py', 'script_key': script_key
             }
-            bot.reply_to(message_obj_for_reply, f"✅ Python script '{file_name}' started! (Container: {container_name}) (For User: {script_owner_id})")
+            bot.reply_to(message_obj_for_reply, f"✅ Python script '{file_name}' started! (PID: {process.pid}) (For User: {script_owner_id})")
         except FileNotFoundError:
              logger.error(f"Python interpreter {sys.executable} not found for long run {script_key}")
              bot.reply_to(message_obj_for_reply, f"❌ Error: Python interpreter '{sys.executable}' not found.")
@@ -2547,28 +2567,23 @@ def run_js_script(script_path, script_owner_id, user_folder, file_name, message_
             bot.reply_to(message_obj_for_reply, f"❌ Failed to open log file '{log_file_path}': {e}")
             return
         try:
-            safe_name = re.sub(r'[^a-zA-Z0-9_.-]', '_', file_name)
-            container_name = f"sandbox_js_{script_owner_id}_{safe_name}"
-            
+            startupinfo = None; creationflags = 0
+            if os.name == 'nt':
+                 startupinfo = subprocess.STARTUPINFO(); startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                 startupinfo.wShowWindow = subprocess.SW_HIDE
             process = subprocess.Popen(
-                ['node', file_name], 
-                cwd=user_folder,
-                stdout=log_file, 
-                stderr=log_file,
-                stdin=subprocess.PIPE, 
-                encoding='utf-8', 
-                errors='ignore'
+                ['node', script_path], cwd=user_folder, stdout=log_file, stderr=log_file,
+                stdin=subprocess.PIPE, startupinfo=startupinfo, creationflags=creationflags,
+                encoding='utf-8', errors='ignore'
             )
-            
-            logger.info(f"Started Docker JS process {process.pid} (Container: {container_name}) for {script_key}")
+            logger.info(f"Started JS process {process.pid} for {script_key}")
             bot_scripts[script_key] = {
                 'process': process, 'log_file': log_file, 'file_name': file_name,
-                'container_name': container_name,
-                'chat_id': message_obj_for_reply.chat.id,
-                'script_owner_id': script_owner_id,
+                'chat_id': message_obj_for_reply.chat.id, # Chat ID for potential future direct replies
+                'script_owner_id': script_owner_id, # Actual owner of the script
                 'start_time': datetime.now(), 'user_folder': user_folder, 'type': 'js', 'script_key': script_key
             }
-            bot.reply_to(message_obj_for_reply, f"✅ JS script '{file_name}' started! (Container: {container_name}) (For User: {script_owner_id})")
+            bot.reply_to(message_obj_for_reply, f"✅ JS script '{file_name}' started! (PID: {process.pid}) (For User: {script_owner_id})")
         except FileNotFoundError:
              error_msg = "❌ Error: 'node' not found for long run. Ensure Node.js is installed."
              logger.error(error_msg)
@@ -3089,15 +3104,6 @@ def command_manual_install(message): _logic_manual_install(message)
 @bot.message_handler(commands=['admininstall'])
 def command_admin_install(message): _logic_admin_install(message)
 
-@bot.message_handler(commands=['dkr'])
-def check_dkr_status(message):
-    if message.from_user.id not in admin_ids: return
-    d_check = shutil.which('docker')
-    if d_check:
-        bot.reply_to(message, f"✅ Docker found at: `{d_check}`", parse_mode='Markdown')
-    else:
-        bot.reply_to(message, "❌ Docker NOT supported on this host.")
-        
 @bot.message_handler(commands=['ping'])
 def ping(message):
     user_id = message.from_user.id
@@ -3152,17 +3158,8 @@ def handle_file_upload_doc(message):
         bot.reply_to(message, f"⚠️ File limit ({current_files}/{limit_str}) reached. Delete files via /checkfiles.")
         return
 
-    raw_file_name = doc.file_name
-    if not raw_file_name: 
-        bot.reply_to(message, "⚠️ No file name. Ensure file has a name.")
-        return
-        
-    file_name = os.path.basename(raw_file_name)
-    
-    if file_name in ['bot_data.db', '.env', 'hmmmmmmm.py', 'requirements.txt']:
-        bot.reply_to(message, "⚠️ Invalid or reserved file name.")
-        return
-
+    file_name = doc.file_name
+    if not file_name: bot.reply_to(message, "⚠️ No file name. Ensure file has a name."); return
     file_ext = os.path.splitext(file_name)[1].lower()
     if file_ext not in ['.py', '.js', '.zip']:
         bot.reply_to(message, "⚠️ Unsupported type! Only `.py`, `.js`, `.zip` allowed.")
@@ -3260,7 +3257,6 @@ def handle_callbacks(call):
         elif data.startswith('restart_'): restart_bot_callback(call)
         elif data.startswith('delete_'): delete_bot_callback(call)
         elif data.startswith('logs_'): logs_bot_callback(call)
-        elif data.startswith('input_'): input_bot_callback(call)
         elif data == 'speed': speed_callback(call)
         elif data == 'back_to_main': back_to_main_callback(call)
         elif data.startswith('confirm_broadcast_'): handle_confirm_broadcast(call)
@@ -3698,10 +3694,7 @@ def logs_bot_callback(call):
         user_folder = get_user_folder(script_owner_id)
         log_path = os.path.join(user_folder, f"{os.path.splitext(file_name)[0]}.log")
         if not os.path.exists(log_path):
-            # Try to create it if it doesn't exist so the user doesn't get an error
-            open(log_path, 'a').close() 
-        
-        bot.answer_callback_query(call.id)
+            bot.answer_callback_query(call.id, f"⚠️ No logs for '{file_name}'.", show_alert=True); return
 
         bot.answer_callback_query(call.id) 
         try:
@@ -3732,34 +3725,7 @@ def logs_bot_callback(call):
     except Exception as e:
         logger.error(f"Error in logs_bot_callback for '{call.data}': {e}", exc_info=True)
         bot.answer_callback_query(call.id, "Error fetching logs.", show_alert=True)
-        
-def input_bot_callback(call):
-    try:
-        _, script_owner_id_str, file_name = call.data.split('_', 2)
-        script_owner_id = int(script_owner_id_str)
-        if not (call.from_user.id == script_owner_id or call.from_user.id in admin_ids):
-            bot.answer_callback_query(call.id, "⚠️ Permission denied.", show_alert=True); return
-        if not is_bot_running(script_owner_id, file_name):
-            bot.answer_callback_query(call.id, "⚠️ Script must be running to send input.", show_alert=True); return
-        bot.answer_callback_query(call.id)
-        msg = bot.send_message(call.message.chat.id, f"⌨️ **Terminal Input for `{file_name}`**\nType the text/command to send to the script's terminal.\n\n/cancel to abort.", parse_mode='Markdown')
-        bot.register_next_step_handler(msg, process_script_terminal_input, script_owner_id, file_name)
-    except Exception as e: logger.error(f"Error in input_bot_callback: {e}")
 
-def process_script_terminal_input(message, script_owner_id, file_name):
-    if message.text and message.text.lower() == '/cancel':
-        bot.reply_to(message, "❌ Input cancelled."); return
-    script_key = f"{script_owner_id}_{file_name}"
-    if script_key in bot_scripts:
-        proc = bot_scripts[script_key].get('process')
-        if proc and proc.poll() is None:
-            try:
-                proc.stdin.write(message.text + "\n")
-                proc.stdin.flush()
-                bot.reply_to(message, f"✅ Sent to `{file_name}` terminal:\n`{message.text}`", parse_mode='Markdown')
-            except Exception as e: bot.reply_to(message, f"❌ Failed to send input: {str(e)}")
-        else: bot.reply_to(message, "⚠️ Script is no longer running.")
-    else: bot.reply_to(message, "⚠️ Script session not found in memory.")                      
 def speed_callback(call):
     user_id = call.from_user.id
     chat_id = call.message.chat.id
