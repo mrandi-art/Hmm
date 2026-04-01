@@ -18,8 +18,17 @@ import re
 import sys
 import atexit
 import requests
+import subprocess
 from dotenv import load_dotenv  # New import for .env
-import google.generativeai as genai # AI Import
+
+# --- Auto-Install AI Library for Stackhost ---
+try:
+    import google.generativeai as genai
+except ImportError:
+    print("⚠️ AI library missing! Auto-installing 'google-generativeai' now...")
+    subprocess.run([sys.executable, "-m", "pip", "install", "google-generativeai"], check=True)
+    import google.generativeai as genai
+    print("✅ Auto-install complete!")
 
 # --- Load environment variables ---
 load_dotenv()  # Load .env file
@@ -27,11 +36,15 @@ load_dotenv()  # Load .env file
 # --- Configure AI Security Scanner ---
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-    ai_model = genai.GenerativeModel('gemini-1.5-flash')
-    print("✅ Google Gemini AI Security Scanner ACTIVATED.")
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        ai_model = genai.GenerativeModel('gemini-1.5-flash')
+        print("✅ Google Gemini AI Security Scanner ACTIVATED.")
+    except Exception as e:
+        print(f"⚠️ AI Scanner failed to activate: {e}")
+        GEMINI_API_KEY = None # Disable gracefully
 else:
-    print("⚠️ No GEMINI_API_KEY found. AI Scanner disabled.")
+    print("⚠️ No GEMINI_API_KEY found in .env. AI Scanner disabled.")
 
 # --- Flask Keep Alive ---
 from flask import Flask
