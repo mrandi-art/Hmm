@@ -2413,137 +2413,105 @@ def handle_py_file(file_path, script_owner_id, user_folder, file_name, message):
 
 # --- Automatic Package Installation & Script Running ---
 def run_script(script_path, script_owner_id, user_folder, file_name, message_obj_for_reply, attempt=1):
-    """Run Python script. script_owner_id is used for the script_key. message_obj_for_reply is for sending feedback."""
+    """Run Python script with fixed PYTHONPATH to detect auto-installed modules."""
     max_attempts = 2 
     if attempt > max_attempts:
         bot.reply_to(message_obj_for_reply, f"❌ Failed to run '{file_name}' after {max_attempts} attempts. Check logs.")
         return
 
     script_key = f"{script_owner_id}_{file_name}"
-    logger.info(f"Attempt {attempt} to run Python script: {script_path} (Key: {script_key}) for user {script_owner_id}")
+    
+    # Setup environment paths
+    user_modules_path = os.path.join(user_folder, 'modules')
+    os.makedirs(user_modules_path, exist_ok=True)
+    
+    env = os.environ.copy()
+    if "PYTHONPATH" in env:
+        env["PYTHONPATH"] = f"{user_modules_path}{os.pathsep}{env['PYTHONPATH']}"
+    else:
+        env["PYTHONPATH"] = user_modules_path
+
+    logger.info(f"Attempt {attempt}: Running Python script: {file_name}")
 
     try:
         if not os.path.exists(script_path):
-             bot.reply_to(message_obj_for_reply, f"❌ Error: Script '{file_name}' not found at '{script_path}'!")
-             logger.error(f"Script not found: {script_path} for user {script_owner_id}")
-             if script_owner_id in user_files:
-                 user_files[script_owner_id] = [f for f in user_files.get(script_owner_id, []) if f[0] != file_name]
-             remove_user_file_db(script_owner_id, file_name)
+             bot.reply_to(message_obj_for_reply, f"❌ Error: Script '{file_name}' not found!")
              return
 
+        # --- PRE-CHECK PHASE ---
         if attempt == 1:
             check_command = [sys.executable, script_path]
-            logger.info(f"Running Python pre-check: {' '.join(check_command)}")
             check_proc = None
             try:
-                check_proc = subprocess.Popen(check_command, cwd=user_folder, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='ignore')
+                # We pass 'env=env' here so the check can see the installed modules
+                check_proc = subprocess.Popen(
+                    check_command, 
+                    cwd=user_folder, 
+                    stdout=subprocess.PIPE, 
+                    stderr=subprocess.PIPE, 
+                    env=env, 
+                    text=True, 
+                    encoding='utf-8', 
+                    errors='ignore'
+                )
                 stdout, stderr = check_proc.communicate(timeout=5)
-                return_code = check_proc.returncode
-                logger.info(f"Python Pre-check early. RC: {return_code}. Stderr: {stderr[:200]}...")
-                if return_code != 0 and stderr:
+                
+                if check_proc.returncode != 0 and stderr:
                     match_py = re.search(r"ModuleNotFoundError: No module named '(.+?)'", stderr)
                     if match_py:
                         module_name = match_py.group(1).strip().strip("'\"")
-                        logger.info(f"Detected missing Python module: {module_name}")
+                        logger.info(f"Detected missing module: {module_name}")
+                        
                         success, _ = attempt_install_pip(module_name, message_obj_for_reply)
                         if success:
-                            logger.info(f"Install OK for {module_name}. Retrying run_script...")
-                            bot.reply_to(message_obj_for_reply, f"🔄 Install successful. Retrying '{file_name}'...")
-                            time.sleep(2)
-                            threading.Thread(target=run_script, args=(script_path, script_owner_id, user_folder, file_name, message_obj_for_reply, attempt + 1)).start()
-                            return
+                            # Re-run for attempt 2
+                            return run_script(script_path, script_owner_id, user_folder, file_name, message_obj_for_reply, attempt + 1)
                         else:
-                            bot.reply_to(message_obj_for_reply, f"❌ Install failed. Cannot run '{file_name}'.")
+                            bot.reply_to(message_obj_for_reply, f"❌ Auto-install failed for `{module_name}`.")
                             return
                     else:
-                         error_summary = stderr[:500]
-                         bot.reply_to(message_obj_for_reply, f"❌ Error in script pre-check for '{file_name}':\n```\n{error_summary}\n```\nFix the script.", parse_mode='Markdown')
+                         bot.reply_to(message_obj_for_reply, f"❌ Error:\n```\n{stderr[:500]}\n```", parse_mode='Markdown')
                          return
             except subprocess.TimeoutExpired:
-                logger.info("Python Pre-check timed out (>5s), imports likely OK. Killing check process.")
-                if check_proc and check_proc.poll() is None: check_proc.kill(); check_proc.communicate()
-                logger.info("Python Check process killed. Proceeding to long run.")
-            except FileNotFoundError:
-                 logger.error(f"Python interpreter not found: {sys.executable}")
-                 bot.reply_to(message_obj_for_reply, f"❌ Error: Python interpreter '{sys.executable}' not found.")
-                 return
+                if check_proc: 
+                    check_proc.kill()
+                    check_proc.communicate()
             except Exception as e:
-                 logger.error(f"Error in Python pre-check for {script_key}: {e}", exc_info=True)
-                 bot.reply_to(message_obj_for_reply, f"❌ Unexpected error in script pre-check for '{file_name}': {e}")
-                 return
-            finally:
-                 if check_proc and check_proc.poll() is None:
-                     logger.warning(f"Python Check process {check_proc.pid} still running. Killing.")
-                     check_proc.kill(); check_proc.communicate()
+                 logger.error(f"Error in pre-check: {e}")
 
-        logger.info(f"Starting long-running Python process for {script_key}")
+        # --- ACTUAL EXECUTION PHASE ---
         log_file_path = os.path.join(user_folder, f"{os.path.splitext(file_name)[0]}.log")
-        log_file = None; process = None
-        try: log_file = open(log_file_path, 'w', encoding='utf-8', errors='ignore')
-        except Exception as e:
-             logger.error(f"Failed to open log file '{log_file_path}' for {script_key}: {e}", exc_info=True)
-             bot.reply_to(message_obj_for_reply, f"❌ Failed to open log file '{log_file_path}': {e}")
-             return
-        try:
-            safe_name = re.sub(r'[^a-zA-Z0-9_.-]', '_', file_name)
-            container_name = f"docker_sandbox_py_{script_owner_id}_{safe_name}"
+        log_file = open(log_file_path, 'w', encoding='utf-8', errors='ignore')
+        
+        docker_command = [sys.executable, '-u', file_name]
+        
+        if sys.platform.startswith('linux'):
+            try: docker_command = ['prlimit', '--as=1073741824'] + docker_command
+            except: pass
             
-            # Set environment variables for Rootless Container
-            env = os.environ.copy()
-            env["PYTHONPATH"] = os.path.join(user_folder, 'modules')
-            env["DOCKER_USER_SPACE"] = "1" # Force Docker bypass mode
+        process = subprocess.Popen(
+            docker_command, 
+            cwd=user_folder,
+            stdout=log_file, 
+            stderr=log_file,
+            stdin=subprocess.PIPE, 
+            env=env,
+            encoding='utf-8', 
+            errors='ignore',
+            preexec_fn=os.setsid if sys.platform.startswith('linux') else None
+        )
+        
+        bot_scripts[script_key] = {
+            'process': process, 'log_file': log_file, 'file_name': file_name,
+            'chat_id': message_obj_for_reply.chat.id,
+            'script_owner_id': script_owner_id,
+            'start_time': datetime.now(), 'user_folder': user_folder, 'type': 'py', 'script_key': script_key
+        }
+        bot.reply_to(message_obj_for_reply, f"✅ Python script `{file_name}` started!")
 
-            # Rootless Docker Execution Bridge
-            docker_command = [sys.executable, '-u', file_name]
-            
-            # Apply container limits simulating Docker cgroups (1GB RAM max per container)
-            if sys.platform.startswith('linux'):
-                try: docker_command = ['prlimit', '--as=1073741824'] + docker_command
-                except: pass
-            
-            process = subprocess.Popen(
-                docker_command, 
-                cwd=user_folder,
-                stdout=log_file, 
-                stderr=log_file,
-                stdin=subprocess.PIPE, 
-                env=env,
-                encoding='utf-8', 
-                errors='ignore',
-                preexec_fn=os.setsid if sys.platform.startswith('linux') else None # True Container Isolation
-            )
-            
-            logger.info(f"Started Rootless Docker Python process {process.pid} (Container: {container_name}) for {script_key}")
-            bot_scripts[script_key] = {
-                'process': process, 'log_file': log_file, 'file_name': file_name,
-                'container_name': container_name,
-                'chat_id': message_obj_for_reply.chat.id,
-                'script_owner_id': script_owner_id,
-                'start_time': datetime.now(), 'user_folder': user_folder, 'type': 'py', 'script_key': script_key
-            }
-            bot.reply_to(message_obj_for_reply, f"✅ Python script '{file_name}' started! (Container: {container_name}) (For User: {script_owner_id})")
-        except FileNotFoundError:
-             logger.error(f"Python interpreter {sys.executable} not found for long run {script_key}")
-             bot.reply_to(message_obj_for_reply, f"❌ Error: Python interpreter '{sys.executable}' not found.")
-             if log_file and not log_file.closed: log_file.close()
-             if script_key in bot_scripts: del bot_scripts[script_key]
-        except Exception as e:
-            if log_file and not log_file.closed: log_file.close()
-            error_msg = f"❌ Error starting Python script '{file_name}': {str(e)}"
-            logger.error(error_msg, exc_info=True)
-            bot.reply_to(message_obj_for_reply, error_msg)
-            if process and process.poll() is None:
-                 logger.warning(f"Killing potentially started Python process {process.pid} for {script_key}")
-                 kill_process_tree({'process': process, 'log_file': log_file, 'script_key': script_key})
-            if script_key in bot_scripts: del bot_scripts[script_key]
     except Exception as e:
-        error_msg = f"❌ Unexpected error running Python script '{file_name}': {str(e)}"
-        logger.error(error_msg, exc_info=True)
-        bot.reply_to(message_obj_for_reply, error_msg)
-        if script_key in bot_scripts:
-             logger.warning(f"Cleaning up {script_key} due to error in run_script.")
-             kill_process_tree(bot_scripts[script_key])
-             del bot_scripts[script_key]
+        logger.error(f"Error: {e}", exc_info=True)
+        bot.reply_to(message_obj_for_reply, f"❌ Error: {str(e)}")
 
 def run_js_script(script_path, script_owner_id, user_folder, file_name, message_obj_for_reply, attempt=1):
     """Run JS script. script_owner_id is used for the script_key. message_obj_for_reply is for sending feedback."""
