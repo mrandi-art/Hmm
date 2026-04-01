@@ -2413,82 +2413,81 @@ def handle_py_file(file_path, script_owner_id, user_folder, file_name, message):
 
 # --- Automatic Package Installation & Script Running ---
 def run_script(script_path, script_owner_id, user_folder, file_name, message_obj_for_reply, attempt=1):
-    """Run Python script with absolute paths to ensure auto-installed modules are detected."""
-    max_attempts = 2 
+    """Run Python script with Absolute Paths and Auto-Dependency Fix."""
+    max_attempts = 3
     if attempt > max_attempts:
-        bot.reply_to(message_obj_for_reply, f"❌ Failed to run '{file_name}' after {max_attempts} attempts. Check logs.")
+        bot.reply_to(message_obj_for_reply, f"❌ Failed to start '{file_name}' after {max_attempts} attempts. Check logs.")
         return
 
     script_key = f"{script_owner_id}_{file_name}"
     
-    # 1. Convert user_folder to an ABSOLUTE path so Python doesn't get lost
+    # 1. Generate ABSOLUTE paths (Fixes most 'not found' issues)
     abs_user_folder = os.path.abspath(user_folder)
-    user_modules_path = os.path.join(abs_user_folder, 'modules')
-    os.makedirs(user_modules_path, exist_ok=True)
+    abs_modules_path = os.path.join(abs_user_folder, 'modules')
+    os.makedirs(abs_modules_path, exist_ok=True)
     
-    # 2. Prepare the environment with the absolute PYTHONPATH
+    # 2. Force Environment Variables
     env = os.environ.copy()
-    if "PYTHONPATH" in env:
-        env["PYTHONPATH"] = f"{user_modules_path}{os.pathsep}{env['PYTHONPATH']}"
-    else:
-        env["PYTHONPATH"] = user_modules_path
+    env["PYTHONPATH"] = abs_modules_path + os.pathsep + env.get("PYTHONPATH", "")
+    env["PYTHONUNBUFFERED"] = "1"
 
-    logger.info(f"Attempt {attempt}: Running {file_name}. Path: {user_modules_path}")
+    logger.info(f"Attempt {attempt}: Starting {file_name} in {abs_user_folder}")
 
     try:
-        if not os.path.exists(script_path):
-             bot.reply_to(message_obj_for_reply, f"❌ Error: Script '{file_name}' not found!"); return
+        # --- PHASE 1: IMPORT VALIDATION ---
+        check_command = [sys.executable, "-u", script_path]
+        check_proc = subprocess.Popen(
+            check_command, 
+            cwd=abs_user_folder, 
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.PIPE, 
+            env=env, 
+            text=True, 
+            encoding='utf-8', 
+            errors='ignore'
+        )
+        
+        try:
+            # Wait to see if it crashes immediately due to missing modules
+            stdout, stderr = check_proc.communicate(timeout=4)
+        except subprocess.TimeoutExpired:
+            # No crash in 4 seconds = Imports are likely perfect!
+            check_proc.kill()
+            stderr = "" 
 
-        # --- PRE-CHECK PHASE ---
-        if attempt == 1:
-            check_command = [sys.executable, script_path]
-            check_proc = None
-            try:
-                # Use absolute paths and environment in the check
-                check_proc = subprocess.Popen(
-                    check_command, 
-                    cwd=abs_user_folder, 
-                    stdout=subprocess.PIPE, 
-                    stderr=subprocess.PIPE, 
-                    env=env, 
-                    text=True, 
-                    encoding='utf-8', 
-                    errors='ignore'
-                )
-                stdout, stderr = check_proc.communicate(timeout=5)
+        if check_proc.returncode != 0 and stderr:
+            # Improved Regex: Detects base package from errors like 'telebot.types' or 'telethon.sync'
+            match = re.search(r"(?:ModuleNotFoundError: No module named|ImportError: No module named) '(.+?)'", stderr)
+            if match:
+                full_module_name = match.group(1).strip().strip("'\"")
+                # Fix: If error is 'telethon.sync', we install 'telethon'
+                base_module = full_module_name.split('.')[0]
                 
-                if check_proc.returncode != 0 and stderr:
-                    # Catch both ModuleNotFoundError and generic ImportError
-                    match_py = re.search(r"(?:ModuleNotFoundError|ImportError): No module named '(.+?)'", stderr)
-                    if match_py:
-                        module_name = match_py.group(1).strip().strip("'\"")
-                        logger.info(f"Auto-installing: {module_name}")
-                        
-                        success, _ = attempt_install_pip(module_name, message_obj_for_reply)
-                        if success:
-                            # Re-run after install
-                            time.sleep(1)
-                            return run_script(script_path, script_owner_id, user_folder, file_name, message_obj_for_reply, attempt + 1)
-                        else:
-                            bot.reply_to(message_obj_for_reply, f"❌ Auto-install failed for `{module_name}`."); return
-                    else:
-                         bot.reply_to(message_obj_for_reply, f"❌ Script error:\n```\n{stderr[:500]}\n```", parse_mode='Markdown'); return
-            except subprocess.TimeoutExpired:
-                if check_proc: check_proc.kill(); check_proc.communicate()
-            except Exception as e:
-                 logger.error(f"Pre-check error: {e}")
+                logger.info(f"Auto-installing missing dependency: {base_module}")
+                success, _ = attempt_install_pip(base_module, message_obj_for_reply)
+                
+                if success:
+                    time.sleep(2) # Essential: Wait for disk sync
+                    return run_script(script_path, script_owner_id, abs_user_folder, file_name, message_obj_for_reply, attempt + 1)
+                else:
+                    bot.reply_to(message_obj_for_reply, f"❌ Auto-install failed for `{base_module}`.")
+                    return
+            else:
+                 # It crashed for a reason other than a missing module
+                 bot.reply_to(message_obj_for_reply, f"❌ Script Error:\n```\n{stderr[:600]}\n```", parse_mode='Markdown')
+                 return
 
-        # --- ACTUAL EXECUTION PHASE ---
+        # --- PHASE 2: LONG RUN EXECUTION ---
         log_file_path = os.path.join(abs_user_folder, f"{os.path.splitext(file_name)[0]}.log")
         log_file = open(log_file_path, 'w', encoding='utf-8', errors='ignore')
         
-        docker_command = [sys.executable, '-u', file_name]
+        cmd = [sys.executable, "-u", file_name]
         if sys.platform.startswith('linux'):
-            try: docker_command = ['prlimit', '--as=1073741824'] + docker_command
+            try: cmd = ['prlimit', '--as=1073741824'] + cmd
             except: pass
             
         process = subprocess.Popen(
-            docker_command, 
+            cmd, 
             cwd=abs_user_folder,
             stdout=log_file, 
             stderr=log_file,
@@ -2505,10 +2504,10 @@ def run_script(script_path, script_owner_id, user_folder, file_name, message_obj
             'script_owner_id': script_owner_id,
             'start_time': datetime.now(), 'user_folder': abs_user_folder, 'type': 'py', 'script_key': script_key
         }
-        bot.reply_to(message_obj_for_reply, f"✅ Python script `{file_name}` is now running!")
+        bot.reply_to(message_obj_for_reply, f"✅ Python script `{file_name}` started!")
 
     except Exception as e:
-        logger.error(f"Run error: {e}", exc_info=True)
+        logger.error(f"Fatal error in run_script: {e}", exc_info=True)
         bot.reply_to(message_obj_for_reply, f"❌ Error: {str(e)}")
 
 def run_js_script(script_path, script_owner_id, user_folder, file_name, message_obj_for_reply, attempt=1):
