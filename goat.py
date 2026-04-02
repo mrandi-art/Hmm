@@ -936,53 +936,12 @@ def remove_admin_db(admin_id):
 
 # --- Menu creation (Inline and ReplyKeyboards) ---
 def create_main_menu_inline(user_id):
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    buttons = [
-        types.InlineKeyboardButton('📢 Updates Channel', url=f'https://t.me/{UPDATE_CHANNEL.replace("@", "")}'),
-        types.InlineKeyboardButton('📤 Upload File', callback_data='upload'),
-        types.InlineKeyboardButton('📂 Check Files', callback_data='check_files'),
-        types.InlineKeyboardButton('⚡ Bot Speed', callback_data='speed'),
-        types.InlineKeyboardButton('📦 Manual Install', callback_data='manual_install'),
-        types.InlineKeyboardButton('📞 Contact Owner', url=f'https://t.me/{YOUR_USERNAME.replace("@", "")}')
-    ]
-
-    if user_id in admin_ids:
-        admin_buttons = [
-            types.InlineKeyboardButton('💳 Subscriptions', callback_data='subscription'), #0
-            types.InlineKeyboardButton('📊 Statistics', callback_data='stats'), #1
-            types.InlineKeyboardButton('🔒 Lock Bot' if not bot_locked else '🔓 Unlock Bot', #2
-                                     callback_data='lock_bot' if not bot_locked else 'unlock_bot'),
-            types.InlineKeyboardButton('📢 Broadcast', callback_data='broadcast'), #3
-            types.InlineKeyboardButton('👑 Admin Panel', callback_data='admin_panel'), #4
-            types.InlineKeyboardButton('🟢 Run All Scripts', callback_data='run_all_scripts'), #5
-            types.InlineKeyboardButton('📢 Channel Add', callback_data='manage_mandatory_channels'), #6
-            types.InlineKeyboardButton('👥 User Management', callback_data='user_management'), #7
-            types.InlineKeyboardButton('🛠️ Admin Install', callback_data='admin_install'), #8
-            types.InlineKeyboardButton('⚙️ Settings', callback_data='admin_settings') #9
-        ]
-        markup.add(buttons[0]) # Updates
-        markup.add(buttons[1], buttons[2]) # Upload, Check Files
-        markup.add(buttons[3], admin_buttons[0]) # Speed, Subscriptions
-        markup.add(admin_buttons[1], admin_buttons[3]) # Stats, Broadcast
-        markup.add(admin_buttons[2], admin_buttons[5]) # Lock Bot, Run All Scripts
-        markup.add(admin_buttons[6], admin_buttons[8]) # Channel Management, Admin Install
-        markup.add(admin_buttons[7], admin_buttons[9]) # User Management, Settings
-        markup.add(admin_buttons[4]) # Admin Panel
-        markup.add(buttons[5]) # Contact
-    else:
-        markup.add(buttons[0])
-        markup.add(buttons[1], buttons[2])
-        markup.add(buttons[3], buttons[4]) # Speed, Manual Install
-        markup.add(types.InlineKeyboardButton('📊 Statistics', callback_data='stats')) # Allow non-admins to see stats too
-        markup.add(buttons[5])
-    return markup
+    # Returns None to permanently disable the inline main menu
+    return None
 
 def create_reply_keyboard_main_menu(user_id):
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    layout_to_use = ADMIN_COMMAND_BUTTONS_LAYOUT_USER_SPEC if user_id in admin_ids else COMMAND_BUTTONS_LAYOUT_USER_SPEC
-    for row_buttons_text in layout_to_use:
-        markup.add(*[types.KeyboardButton(text) for text in row_buttons_text])
-    return markup
+    # This sends a signal to Telegram to hide and destroy the old keyboard
+    return types.ReplyKeyboardRemove()
 
 def create_control_buttons(script_owner_id, file_name, is_running=True):
     markup = types.InlineKeyboardMarkup(row_width=2)
@@ -1512,7 +1471,7 @@ def _logic_send_welcome(message):
                         f"🤖 Host & run Python (`.py`) or JS (`.js`) scripts.\n"
                         f"   Upload single scripts or `.zip` archives.\n"
                         f"📦 Manual module installation available\n\n"
-                        f"👇 Use buttons or type commands.")
+                        f"👇 Click the ☰ Menu button below to use the bot.")
     
     main_reply_markup = create_reply_keyboard_main_menu(user_id)
     try:
@@ -1948,6 +1907,10 @@ def command_user_management(message): _logic_user_management(message)
 def command_manual_install(message): _logic_manual_install(message)
 @bot.message_handler(commands=['admininstall'])
 def command_admin_install(message): _logic_admin_install(message)
+@bot.message_handler(commands=['settings'])
+def command_settings(message): _logic_admin_settings(message)
+@bot.message_handler(commands=['settings'])
+def command_settings(message): _logic_admin_settings(message)
 
 @bot.message_handler(commands=['dkr'])
 def check_dkr_status(message):
@@ -3792,10 +3755,27 @@ atexit.register(cleanup)
 
 # --- Main Execution ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n🤖 Mahesh Hosting Bot Starting Up...\n" + f"🐍 Python: {sys.version.split()[0]}\n" +
+    logger.info("="*50 + "\n🤖 Znx Hosting Bot Starting Up...\n" + f"🐍 Python: {sys.version.split()[0]}\n" +
                 f"🔧 Base Dir: {BASE_DIR}\n📁 Upload Dir: {UPLOAD_BOTS_DIR}\n" +
                 f"📊 Data Dir: {IROTECH_DIR}\n🔑 Owner ID: {OWNER_ID}\n🛡️ Admins: {len(admin_ids)}\n" +
                 f"🚫 Banned Users: {len(banned_users)}\n📢 Mandatory Channels: {len(mandatory_channels)}\n" + "="*50)
+    
+    # --- SETUP NATIVE TELEGRAM MENU ---
+    try:
+        bot.set_my_commands([
+            telebot.types.BotCommand("/start", "Start the bot & check status"),
+            telebot.types.BotCommand("/uploadfile", "Upload a script or zip file"),
+            telebot.types.BotCommand("/checkfiles", "Manage your uploaded files"),
+            telebot.types.BotCommand("/manualinstall", "Install a missing module"),
+            telebot.types.BotCommand("/botspeed", "Check bot latency"),
+            telebot.types.BotCommand("/status", "View bot statistics"),
+            telebot.types.BotCommand("/contactowner", "Contact the bot owner"),
+            telebot.types.BotCommand("/help", "Show help guide")
+        ])
+        logger.info("✅ Native Bot Command Menu successfully configured.")
+    except Exception as e:
+        logger.error(f"⚠️ Failed to set bot commands: {e}")
+
     keep_alive()
     logger.info("🚀 Starting polling...")
     while True:
