@@ -869,18 +869,20 @@ def check_code_security(file_path, file_type):
             if re.search(pattern, content, re.IGNORECASE):
                 found_patterns.append(pattern)
         
-        if found_patterns:
-            logger.warning(f"🚨 Dangerous patterns detected in {file_path}: {found_patterns}")
-            return False, f"Code contains dangerous commands: {', '.join(found_patterns[:5])}"  # Show first 5 only
-        
-        # 🤖 If the dumb word-scanner misses it, hand it over to the AI!
-        logger.info(f"Regex passed. Sending {file_path} to AI for deep analysis...")
+        # 🤖 Run the AI Scanner FIRST
+        logger.info(f"Sending {file_path} to AI for deep analysis...")
         is_ai_safe, ai_msg = ai_security_scan(content, file_path)
         
+        # If AI says it's dangerous, block it immediately
         if not is_ai_safe:
-            return False, ai_msg # Block the file!
+            return False, ai_msg 
             
-        return True, "Code is safe (Verified by Regex & AI)"
+        # If AI says it is SAFE, run the regex as a backup (Optional)
+        if found_patterns:
+            logger.warning(f"🚨 Dangerous patterns detected in {file_path}: {found_patterns}")
+            return False, f"Code contains dangerous commands: {', '.join(found_patterns[:5])}"
+            
+        return True, "Code is safe (Verified by AI & Regex)"
     except Exception as e:
         logger.error(f"Error in security check: {e}")
         return False, f"Security check error: {str(e)}"
