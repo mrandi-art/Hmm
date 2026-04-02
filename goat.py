@@ -1877,7 +1877,7 @@ def save_install_log(user_id, module_name, package_name, status, log):
         finally:
             conn.close()
 
-def attempt_install_pip(module_name, message, manual_request=False):
+def attempt_install_pip(module_name, user_id, message, manual_request=False):
     """Install Python package via pip"""
     package_name = TELEGRAM_MODULES.get(module_name.lower(), module_name) 
     if package_name is None: 
@@ -1890,7 +1890,6 @@ def attempt_install_pip(module_name, message, manual_request=False):
         else:
             bot.reply_to(message, f"🐍 Module `{module_name}` not found. Installing `{package_name}`...", parse_mode='Markdown')
         
-        user_id = message.from_user.id if hasattr(message, 'from_user') else OWNER_ID
         user_folder = get_user_folder(user_id)
         
         command = [
@@ -2003,7 +2002,7 @@ def process_manual_install_module(message):
         success, log = attempt_install_npm(module_name, user_folder, message, manual_request=True)
     else:
         # Python module
-        success, log = attempt_install_pip(module_name, message, manual_request=True)
+        success, log = attempt_install_pip(module_name, user_id, message, manual_request=True)
     
     if success:
         logger.info(f"User {user_id} manually installed module: {module_name}")
@@ -2464,7 +2463,7 @@ def run_script(script_path, script_owner_id, user_folder, file_name, message_obj
                 base_module = full_module_name.split('.')[0]
                 
                 logger.info(f"Auto-installing missing dependency: {base_module}")
-                success, _ = attempt_install_pip(base_module, message_obj_for_reply)
+                success, _ = attempt_install_pip(base_module, script_owner_id, message_obj_for_reply)
                 
                 if success:
                     time.sleep(2) # Essential: Wait for disk sync
@@ -3053,7 +3052,7 @@ def process_admin_install(message):
             success, log = attempt_install_npm(module_name, user_folder, message, manual_request=True)
         else:
             # Python module
-            success, log = attempt_install_pip(module_name, message, manual_request=True)
+            success, log = attempt_install_pip(module_name, user_id, message, manual_request=True)
         
         if success:
             logger.info(f"Admin {admin_id} installed module {module_name} for user {user_id}")
